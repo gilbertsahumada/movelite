@@ -25,6 +25,7 @@ pub async fn run(session: SessionWrapper, port: u16) -> Result<()> {
             "/v1/accounts/:address/resource/*resource_type",
             get(get_account_resource),
         )
+        .route("/v1/accounts/:address/resources", get(get_account_resources))
         .route("/v1/view", post(view_function))
         .route("/mint", post(mint))
         .with_state(state);
@@ -112,6 +113,34 @@ async fn get_account(
 struct ResourceResponse {
     r#type: String,
     data: serde_json::Value,
+}
+
+async fn get_account_resources(
+    State(session): State<AppState>,
+    Path(address): Path<String>,
+) -> Result<Json<Vec<ResourceResponse>>, (StatusCode, String)> {
+    let addr = parse_address(&address)?;
+
+    let known_types = [
+        "0x1::account::Account",
+        "0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>",
+        "0x1::fungible_asset::FungibleStore",
+        "0x1::object::ObjectCore",
+    ];
+
+    let mut resources = Vec::new();
+    for type_str in &known_types {
+        if let Ok(tag) = type_str.parse::<StructTag>() {
+            if let Ok(Some(data)) = session.view_resource(addr, &tag) {
+                resources.push(ResourceResponse {
+                    r#type: type_str.to_string(),
+                    data,
+                });
+            }
+        }
+    }
+
+    Ok(Json(resources))
 }
 
 async fn get_account_resource(
