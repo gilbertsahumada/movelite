@@ -8,12 +8,14 @@ use std::sync::Mutex;
 
 pub struct SessionWrapper {
     inner: Mutex<Session>,
+    ops_count: Mutex<u64>,
 }
 
 impl SessionWrapper {
     pub fn new(session: Session) -> Self {
         Self {
             inner: Mutex::new(session),
+            ops_count: Mutex::new(0),
         }
     }
 
@@ -40,6 +42,19 @@ impl SessionWrapper {
     ) -> Result<Option<serde_json::Value>> {
         let mut session = self.inner.lock().unwrap();
         session.view_resource(account_addr, resource_tag)
+    }
+
+    pub fn get_chain_id(&self) -> u64 {
+        4
+    }
+
+    pub fn get_ops_count(&self) -> u64 {
+        self.ops_count.lock().unwrap().clone()
+    }
+
+    pub fn increment_ops(&self) {
+        let mut count = self.ops_count.lock().unwrap();
+        *count += 1;
     }
 }
 

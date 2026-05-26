@@ -47,16 +47,17 @@ struct LedgerInfoResponse {
     block_height: String,
 }
 
-async fn ledger_info() -> Json<LedgerInfoResponse> {
+async fn ledger_info(State(session): State<AppState>) -> Json<LedgerInfoResponse> {
+    let ops = session.get_ops_count();
     Json(LedgerInfoResponse {
-        chain_id: 4,
-        epoch: "0".to_string(),
-        ledger_version: "0".to_string(),
+        chain_id: session.get_chain_id(),
+        epoch: "1".to_string(),
+        ledger_version: ops.to_string(),
         oldest_ledger_version: "0".to_string(),
         ledger_timestamp: "0".to_string(),
         node_role: "full_node".to_string(),
         oldest_block_height: "0".to_string(),
-        block_height: "0".to_string(),
+        block_height: ops.to_string(),
     })
 }
 
@@ -182,6 +183,7 @@ async fn mint(
     session
         .fund_account(addr, params.amount)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    session.increment_ops();
 
     Ok(Json(serde_json::json!({
         "status": "ok",
