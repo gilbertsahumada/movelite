@@ -118,7 +118,8 @@ async fn get_account_resource(
     Path((address, resource_type)): Path<(String, String)>,
 ) -> Result<Json<ResourceResponse>, (StatusCode, String)> {
     let addr = parse_address(&address)?;
-    let decoded_type = urlencoding::decode(&resource_type)
+    let trimmed = resource_type.strip_prefix('/').unwrap_or(&resource_type);
+    let decoded_type = urlencoding::decode(trimmed)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let tag = parse_struct_tag(&decoded_type)?;
 
