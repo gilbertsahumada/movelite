@@ -1,6 +1,8 @@
 use anyhow::Result;
 use aptos_transaction_simulation_session::{BlockTimestamp, Session};
 use aptos_types::account_address::AccountAddress;
+use aptos_types::transaction::{SignedTransaction, TransactionOutput};
+use aptos_types::vm_status::VMStatus;
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::{ModuleId, StructTag, TypeTag};
 use std::path::PathBuf;
@@ -42,6 +44,16 @@ impl SessionWrapper {
     ) -> Result<Option<serde_json::Value>> {
         let mut session = self.inner.lock().unwrap();
         session.view_resource(account_addr, resource_tag)
+    }
+
+    pub fn execute_transaction(
+        &self,
+        txn: SignedTransaction,
+    ) -> Result<(VMStatus, TransactionOutput)> {
+        let mut session = self.inner.lock().unwrap();
+        let result = session.execute_transaction(txn, false, false)?;
+        session.new_block(BlockTimestamp::Default)?;
+        Ok(result)
     }
 
     pub fn get_chain_id(&self) -> u64 {

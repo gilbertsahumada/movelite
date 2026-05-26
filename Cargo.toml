@@ -18,3 +18,4 @@ clap = { workspace = true, features = ["derive"] }
 url = { workspace = true }
 urlencoding = "2"
 bcs = { workspace = true }
+hex = { workspace = true }

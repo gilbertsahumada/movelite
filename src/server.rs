@@ -27,6 +27,7 @@ pub async fn run(session: SessionWrapper, port: u16) -> Result<()> {
         )
         .route("/v1/accounts/:address/resources", get(get_account_resources))
         .route("/v1/view", post(view_function))
+        .route("/v1/transactions", post(submit_transaction))
         .route("/mint", post(mint))
         .with_state(state);
 
@@ -195,6 +196,34 @@ async fn view_function(
         .execute_view_function(module_id, func_name, ty_args, args)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+async fn submit_transaction(
+    State(session): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let txn: aptos_types::transaction::SignedTransaction =
+        bcs::from_bytes(&body).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to deserialize BCS transaction: {}", e),
+            )
+        })?;
+
+    let (vm_status, output) = session
+        .execute_transaction(txn)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    session.increment_ops();
+
+    let success = vm_status == aptos_types::vm_status::VMStatus::Executed;
+
+    Ok(Json(serde_json::json!({
+        "hash": format!("0x{}", hex::encode([0u8; 32])),
+        "vm_status": format!("{:?}", vm_status),
+        "success": success,
+        "gas_used": output.gas_used().to_string(),
+    })))
 }
 
 #[derive(Deserialize)]
