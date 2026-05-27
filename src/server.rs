@@ -18,20 +18,21 @@ type AppState = Arc<SessionWrapper>;
 pub async fn run(session: SessionWrapper, port: u16) -> Result<()> {
     let state: AppState = Arc::new(session);
 
+    let v1 = Router::new()
+        .route("/", get(ledger_info))
+        .route("/accounts/:address", get(get_account))
+        .route("/accounts/:address/resource/*resource_type", get(get_account_resource))
+        .route("/accounts/:address/resources", get(get_account_resources))
+        .route("/accounts/:address/module/:module_name", get(get_module))
+        .route("/estimate_gas_price", get(estimate_gas_price))
+        .route("/view", post(view_function))
+        .route("/transactions", post(submit_transaction))
+        .route("/transactions/simulate", post(simulate_transaction))
+        .route("/transactions/by_hash/:hash", get(get_transaction_by_hash))
+        .route("/transactions/wait_by_hash/:hash", get(get_transaction_by_hash));
+
     let app = Router::new()
-        .route("/v1/", get(ledger_info))
-        .route("/v1/accounts/:address", get(get_account))
-        .route(
-            "/v1/accounts/:address/resource/*resource_type",
-            get(get_account_resource),
-        )
-        .route("/v1/accounts/:address/resources", get(get_account_resources))
-        .route("/v1/estimate_gas_price", get(estimate_gas_price))
-        .route("/v1/view", post(view_function))
-        .route("/v1/transactions", post(submit_transaction))
-        .route("/v1/transactions/simulate", post(simulate_transaction))
-        .route("/v1/transactions/by_hash/:hash", get(get_transaction_by_hash))
-        .route("/v1/transactions/wait_by_hash/:hash", get(get_transaction_by_hash))
+        .nest("/v1", v1)
         .route("/mint", post(mint))
         .with_state(state);
 
@@ -53,9 +54,9 @@ struct LedgerInfoResponse {
     block_height: String,
 }
 
-async fn ledger_info(State(session): State<AppState>) -> Json<LedgerInfoResponse> {
+fn build_ledger_info(session: &SessionWrapper) -> LedgerInfoResponse {
     let ops = session.get_ops_count();
-    Json(LedgerInfoResponse {
+    LedgerInfoResponse {
         chain_id: session.get_chain_id(),
         epoch: "1".to_string(),
         ledger_version: ops.to_string(),
@@ -64,7 +65,11 @@ async fn ledger_info(State(session): State<AppState>) -> Json<LedgerInfoResponse
         node_role: "full_node".to_string(),
         oldest_block_height: "0".to_string(),
         block_height: ops.to_string(),
-    })
+    }
+}
+
+async fn ledger_info(State(session): State<AppState>) -> Json<LedgerInfoResponse> {
+    Json(build_ledger_info(&session))
 }
 
 async fn estimate_gas_price() -> Json<serde_json::Value> {
@@ -111,10 +116,10 @@ async fn get_account(
                 authentication_key: auth_key,
             }))
         }
-        Ok(None) => Err((
-            StatusCode::NOT_FOUND,
-            format!("Account {} not found (view_resource returned None)", address),
-        )),
+        Ok(None) => Ok(Json(AccountDataResponse {
+            sequence_number: "0".to_string(),
+            authentication_key: format!("0x{}", "0".repeat(64)),
+        })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("view_resource error for {}: {}", address, e),
@@ -160,6 +165,32 @@ async fn get_account_resources(
     }
 
     Ok(Json(resources))
+}
+
+async fn get_module(
+    State(session): State<AppState>,
+    Path((address, module_name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let addr = parse_address(&address)?;
+
+    let bytes = session
+        .get_module_bytes(addr, &module_name)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match bytes {
+        Some(bytecode) => {
+            let module_bytecode = aptos_api_types::MoveModuleBytecode::new(bytecode)
+                .try_parse_abi()
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("ABI parse error: {}", e)))?;
+            serde_json::to_value(module_bytecode)
+                .map(Json)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
+        None => Err((
+            StatusCode::NOT_FOUND,
+            format!("Module not found: {}::{}", address, module_name),
+        )),
+    }
 }
 
 async fn get_account_resource(

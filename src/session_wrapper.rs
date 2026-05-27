@@ -1,6 +1,8 @@
 use anyhow::Result;
 use aptos_transaction_simulation_session::{BlockTimestamp, Session};
 use aptos_types::account_address::AccountAddress;
+use aptos_types::state_store::state_key::StateKey;
+use aptos_types::state_store::TStateView;
 use aptos_types::transaction::{SignedTransaction, TransactionOutput};
 use aptos_types::vm_status::VMStatus;
 use move_core_types::identifier::Identifier;
@@ -69,12 +71,28 @@ impl SessionWrapper {
 
     pub fn store_transaction(&self, hash: String, result: serde_json::Value) {
         let mut store = self.tx_store.lock().unwrap();
+        if store.len() >= 10_000 {
+            if let Some(oldest) = store.keys().next().cloned() {
+                store.remove(&oldest);
+            }
+        }
         store.insert(hash, result);
     }
 
     pub fn get_transaction(&self, hash: &str) -> Option<serde_json::Value> {
         let store = self.tx_store.lock().unwrap();
         store.get(hash).cloned()
+    }
+
+    pub fn get_module_bytes(&self, addr: AccountAddress, name: &str) -> Result<Option<Vec<u8>>> {
+        let session = self.inner.lock().unwrap();
+        let module_id = ModuleId::new(addr, Identifier::new(name)?);
+        let state_key = StateKey::module_id(&module_id);
+        match session.state_store().get_state_value_bytes(&state_key) {
+            Ok(Some(bytes)) => Ok(Some(bytes.to_vec())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("Failed to read module: {:?}", e)),
+        }
     }
 
     pub fn get_chain_id(&self) -> u64 {
