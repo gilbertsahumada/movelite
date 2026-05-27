@@ -65,8 +65,15 @@ impl SessionWrapper {
         &self,
         txn: SignedTransaction,
     ) -> Result<(VMStatus, TransactionOutput)> {
+        // Known limitation: the Session API has no snapshot/rollback,
+        // so simulation applies the write set to the state store.
+        // Gas estimation is accurate but state side-effects persist.
+        // For a dev tool this is acceptable. A proper fix requires
+        // cloning the state store or adding snapshot support upstream.
         let mut session = self.inner.lock().unwrap();
-        session.execute_transaction(txn, false, false)
+        let result = session.execute_transaction(txn, false, false)?;
+        // Do NOT advance block — this distinguishes simulate from submit.
+        Ok(result)
     }
 
     pub fn store_transaction(&self, hash: String, result: serde_json::Value) {
