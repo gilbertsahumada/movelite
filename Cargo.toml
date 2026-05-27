@@ -9,6 +9,7 @@ license = "Apache-2.0"
 aptos-transaction-simulation-session = { path = "../.aptos-core/aptos-move/aptos-transaction-simulation-session" }
 aptos-types = { workspace = true }
 aptos-crypto = { workspace = true }
+aptos-api-types = { workspace = true }
 move-core-types = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

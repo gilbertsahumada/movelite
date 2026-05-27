@@ -194,8 +194,27 @@ struct ViewRequest {
 
 async fn view_function(
     State(session): State<AppState>,
-    Json(payload): Json<ViewRequest>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json");
+
+    if content_type.contains("bcs") {
+        let vf: aptos_api_types::ViewFunction = bcs::from_bytes(&body)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("BCS deserialize error: {}", e)))?;
+
+        return session
+            .execute_view_function(vf.module, vf.function, vf.ty_args, vf.args)
+            .map(Json)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()));
+    }
+
+    let payload: ViewRequest = serde_json::from_slice(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("JSON parse error: {}", e)))?;
+
     let (module_id, func_name) = parse_function_id(&payload.function)?;
 
     let ty_args: Vec<TypeTag> = payload
