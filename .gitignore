@@ -1,3 +1,4 @@
 .aptos-core/
 .mvlite-session/
 target/
+/docs
