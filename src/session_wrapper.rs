@@ -79,6 +79,18 @@ impl SessionWrapper {
         store.get(hash).cloned()
     }
 
+    pub fn has_any_state(&self, addr: AccountAddress) -> bool {
+        let session = self.inner.lock().unwrap();
+        let fungible_tag = StructTag {
+            address: AccountAddress::ONE,
+            module: Identifier::new("fungible_asset").unwrap(),
+            name: Identifier::new("FungibleStore").unwrap(),
+            type_args: vec![],
+        };
+        let key = StateKey::resource(&addr, &fungible_tag).unwrap();
+        matches!(session.state_store().get_state_value_bytes(&key), Ok(Some(_)))
+    }
+
     pub fn get_module_bytes(&self, addr: AccountAddress, name: &str) -> Result<Option<Vec<u8>>> {
         let session = self.inner.lock().unwrap();
         let module_id = ModuleId::new(addr, Identifier::new(name)?);

@@ -116,10 +116,14 @@ async fn get_account(
                 authentication_key: auth_key,
             }))
         }
-        Ok(None) => Ok(Json(AccountDataResponse {
+        Ok(None) if session.has_any_state(addr) => Ok(Json(AccountDataResponse {
             sequence_number: "0".to_string(),
             authentication_key: format!("0x{}", "0".repeat(64)),
         })),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            format!("Account not found: {}", address),
+        )),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("view_resource error for {}: {}", address, e),
