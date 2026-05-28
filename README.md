@@ -69,7 +69,8 @@ The build script clones `aptos-core` (pinned to the last Apache 2.0 commit) and 
 
 ```bash
 # Fund an account
-curl -X POST "http://localhost:8090/mint?address=0x42&amount=1000000000"
+curl -X POST "http://localhost:8090/mint?address=0x42&amount=1000000000" \
+  -H "x-mvlite-token: <token printed at startup>"
 
 # Query account
 curl http://localhost:8090/v1/accounts/0x1
@@ -88,12 +89,12 @@ mvlite implements a subset of the [Aptos REST API](https://aptos.dev/en/build/ap
 |---|---|---|---|
 | `/v1/` | GET | Ledger info (chain_id, version, etc.) | Done |
 | `/v1/accounts/:address` | GET | Account data (sequence number, auth key) | Done |
-| `/v1/accounts/:address/resources` | GET | All account resources | Done |
+| `/v1/accounts/:address/resources` | GET | Common framework resources subset | Done |
 | `/v1/accounts/:address/resource/:type` | GET | Specific account resource | Done |
 | `/v1/view` | POST | Execute view function (BCS args) | Done |
 | `/v1/transactions` | POST | Submit signed transaction (BCS body) | Done |
 | `/v1/transactions/simulate` | POST | Simulate transaction without commit | Done |
-| `/mint` | POST | Fund account (faucet) | Done |
+| `/mint` | POST | Fund account (faucet, requires `x-mvlite-token` by default) | Done |
 
 ## Integration with movehat
 
