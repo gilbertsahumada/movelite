@@ -1,6 +1,6 @@
 {
   "name": "mvlite",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Lightweight Move VM for local development — anvil-like experience for Movement L1",
   "repository": {
     "type": "git",
@@ -14,9 +14,9 @@
     "bin/"
   ],
   "optionalDependencies": {
-    "mvlite-darwin-arm64": "0.0.0",
-    "mvlite-darwin-x64": "0.0.0",
-    "mvlite-linux-x64": "0.0.0",
-    "mvlite-linux-arm64": "0.0.0"
+    "mvlite-darwin-arm64": "0.1.0",
+    "mvlite-darwin-x64": "0.1.0",
+    "mvlite-linux-x64": "0.1.0",
+    "mvlite-linux-arm64": "0.1.0"
   }
 }
