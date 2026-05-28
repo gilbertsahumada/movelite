@@ -34,12 +34,18 @@ Movement's local node (`movement node run-localnet`) takes ~15 seconds to boot. 
 
 ## Quick start
 
-### Prerequisites
+### Install (recommended)
 
-- Rust 1.93+ (`rustup update stable`)
-- Git
+```bash
+npm install -g mvlite
+mvlite start --port 8090
+```
 
-### Build
+Pre-compiled binaries are published to npm for `darwin-arm64`, `darwin-x64`, `linux-x64`, and `linux-arm64`. The right binary is selected automatically via npm's `optionalDependencies`.
+
+### Build from source
+
+Requires Rust 1.93+ and Git.
 
 ```bash
 git clone https://github.com/gilbertsahumada/mvlite.git
@@ -91,17 +97,14 @@ mvlite implements a subset of the [Aptos REST API](https://aptos.dev/en/build/ap
 
 ## Integration with movehat
 
-mvlite is designed to be a drop-in replacement for Movement's local node when used with [movehat](https://github.com/gilbertsahumada/movehat). Future versions of movehat will detect a running mvlite instance and use it automatically:
+mvlite is auto-detected by [movehat](https://github.com/gilbertsahumada/movehat) `>=0.2.7`. If a mvlite binary is on `PATH` (or installed via `npm install mvlite`), movehat spawns it instead of the Movement node:
 
 ```typescript
-// Today (with Movement node): ~15s boot
 harness = await Harness.createLocal({ ... });
-
-// Tomorrow (with mvlite): <1s boot, same API
-harness = await Harness.createLocal({ ... });
+// Uses mvlite if available (<1s boot), falls back to Movement node otherwise (~15s).
 ```
 
-No code changes required on the movehat side.
+Opt out per call with `Harness.createLocal({ useMvlite: false })`.
 
 ## How it works
 

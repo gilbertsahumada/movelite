@@ -91,5 +91,16 @@ The aptos-core dependency is pinned to commit `e33e3c1b9e` — the last commit u
 ./target/mvlite version             # Show version
 ```
 
+### Release process
+
+Releases are cut by GitHub Actions (`.github/workflows/release.yml`). Two triggers:
+
+- **`workflow_dispatch`** with a `version` input — for first-of-its-kind releases or hotfixes
+- **`push` of a `v*` tag** — for normal releases (`git tag v0.1.0 && git push --tags`)
+
+Both paths run the same matrix: build mvlite on each of the 4 target platforms (`darwin-{arm64,x64}`, `linux-{x64,arm64}`) using native runners, then a `publish` job downloads the binaries and pushes one platform package per target to npm plus the main `mvlite` shim package.
+
+The `NPM_TOKEN` repo secret must be set (granular access token, package scope: `mvlite*`). npm provenance is enabled via OIDC.
+
 ### License
 Apache 2.0. Uses aptos-core code from the pre-license-change era (commit `e33e3c1b9e`, Nov 20 2025). See LICENSE for details.

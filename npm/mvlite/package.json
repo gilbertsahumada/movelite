@@ -1,0 +1,22 @@
+{
+  "name": "mvlite",
+  "version": "0.0.0",
+  "description": "Lightweight Move VM for local development — anvil-like experience for Movement L1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gilbertsahumada/mvlite.git"
+  },
+  "license": "Apache-2.0",
+  "bin": {
+    "mvlite": "bin/mvlite.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "optionalDependencies": {
+    "mvlite-darwin-arm64": "0.0.0",
+    "mvlite-darwin-x64": "0.0.0",
+    "mvlite-linux-x64": "0.0.0",
+    "mvlite-linux-arm64": "0.0.0"
+  }
+}

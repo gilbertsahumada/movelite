@@ -1,4 +1,6 @@
 .aptos-core/
 .mvlite-session/
 target/
+build/
+node_modules/
 /docs
