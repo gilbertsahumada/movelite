@@ -7,6 +7,7 @@ license = "Apache-2.0"
 
 [dependencies]
 aptos-transaction-simulation-session = { path = "../.aptos-core/aptos-move/aptos-transaction-simulation-session" }
+aptos-transaction-simulation = { workspace = true }
 aptos-types = { workspace = true }
 aptos-crypto = { workspace = true }
 aptos-api-types = { workspace = true }

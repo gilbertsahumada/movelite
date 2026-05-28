@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "SDK integration tests for mvlite",
   "scripts": {
-    "test": "tsx integration.ts"
+    "test": "tsx run.ts"
   },
   "type": "commonjs",
   "dependencies": {

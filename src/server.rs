@@ -3,7 +3,7 @@ use anyhow::Result;
 use aptos_types::account_address::AccountAddress;
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::Json,
     routing::{get, post},
     Router,
@@ -13,15 +13,28 @@ use move_core_types::language_storage::{ModuleId, StructTag, TypeTag};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-type AppState = Arc<SessionWrapper>;
+type AppState = Arc<ServerState>;
 
-pub async fn run(session: SessionWrapper, port: u16) -> Result<()> {
-    let state: AppState = Arc::new(session);
+pub struct ServerOptions {
+    pub auth_token: Option<String>,
+    pub strict_local_auth: bool,
+}
+
+struct ServerState {
+    session: SessionWrapper,
+    options: ServerOptions,
+}
+
+pub async fn run(session: SessionWrapper, port: u16, options: ServerOptions) -> Result<()> {
+    let state: AppState = Arc::new(ServerState { session, options });
 
     let v1 = Router::new()
         .route("/", get(ledger_info))
         .route("/accounts/:address", get(get_account))
-        .route("/accounts/:address/resource/*resource_type", get(get_account_resource))
+        .route(
+            "/accounts/:address/resource/*resource_type",
+            get(get_account_resource),
+        )
         .route("/accounts/:address/resources", get(get_account_resources))
         .route("/accounts/:address/module/:module_name", get(get_module))
         .route("/estimate_gas_price", get(estimate_gas_price))
@@ -29,14 +42,19 @@ pub async fn run(session: SessionWrapper, port: u16) -> Result<()> {
         .route("/transactions", post(submit_transaction))
         .route("/transactions/simulate", post(simulate_transaction))
         .route("/transactions/by_hash/:hash", get(get_transaction_by_hash))
-        .route("/transactions/wait_by_hash/:hash", get(get_transaction_by_hash));
+        .route(
+            "/transactions/wait_by_hash/:hash",
+            get(get_transaction_by_hash),
+        );
 
     let app = Router::new()
+        .route("/v1/", get(ledger_info))
         .nest("/v1", v1)
         .route("/mint", post(mint))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
+    eprintln!("Listening on http://127.0.0.1:{}", port);
     axum::serve(listener, app).await?;
 
     Ok(())
@@ -54,10 +72,10 @@ struct LedgerInfoResponse {
     block_height: String,
 }
 
-fn build_ledger_info(session: &SessionWrapper) -> LedgerInfoResponse {
-    let ops = session.get_ops_count();
+fn build_ledger_info(state: &ServerState) -> LedgerInfoResponse {
+    let ops = state.session.get_ops_count();
     LedgerInfoResponse {
-        chain_id: session.get_chain_id(),
+        chain_id: state.session.get_chain_id(),
         epoch: "1".to_string(),
         ledger_version: ops.to_string(),
         oldest_ledger_version: "0".to_string(),
@@ -99,7 +117,7 @@ async fn get_account(
         type_args: vec![],
     };
 
-    match session.view_resource(addr, &account_tag) {
+    match session.session.view_resource(addr, &account_tag) {
         Ok(Some(value)) => {
             let seq = value
                 .get("sequence_number")
@@ -155,7 +173,7 @@ async fn get_account_resources(
     let mut resources = Vec::new();
     for type_str in &known_types {
         if let Ok(tag) = type_str.parse::<StructTag>() {
-            if let Ok(Some(data)) = session.view_resource(addr, &tag) {
+            if let Ok(Some(data)) = session.session.view_resource(addr, &tag) {
                 resources.push(ResourceResponse {
                     r#type: type_str.to_string(),
                     data,
@@ -174,6 +192,7 @@ async fn get_module(
     let addr = parse_address(&address)?;
 
     let bytes = session
+        .session
         .get_module_bytes(addr, &module_name)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -181,7 +200,12 @@ async fn get_module(
         Some(bytecode) => {
             let module_bytecode = aptos_api_types::MoveModuleBytecode::new(bytecode)
                 .try_parse_abi()
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("ABI parse error: {}", e)))?;
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("ABI parse error: {}", e),
+                    )
+                })?;
             serde_json::to_value(module_bytecode)
                 .map(Json)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
@@ -199,11 +223,11 @@ async fn get_account_resource(
 ) -> Result<Json<ResourceResponse>, (StatusCode, String)> {
     let addr = parse_address(&address)?;
     let trimmed = resource_type.strip_prefix('/').unwrap_or(&resource_type);
-    let decoded_type = urlencoding::decode(trimmed)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let decoded_type =
+        urlencoding::decode(trimmed).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let tag = parse_struct_tag(&decoded_type)?;
 
-    match session.view_resource(addr, &tag) {
+    match session.session.view_resource(addr, &tag) {
         Ok(Some(data)) => Ok(Json(ResourceResponse {
             r#type: decoded_type.to_string(),
             data,
@@ -234,10 +258,15 @@ async fn view_function(
         .unwrap_or("application/json");
 
     if content_type.contains("bcs") {
-        let vf: aptos_api_types::ViewFunction = bcs::from_bytes(&body)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("BCS deserialize error: {}", e)))?;
+        let vf: aptos_api_types::ViewFunction = bcs::from_bytes(&body).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("BCS deserialize error: {}", e),
+            )
+        })?;
 
         return session
+            .session
             .execute_view_function(vf.module, vf.function, vf.ty_args, vf.args)
             .map(Json)
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()));
@@ -261,6 +290,7 @@ async fn view_function(
         .collect::<Result<_, _>>()?;
 
     session
+        .session
         .execute_view_function(module_id, func_name, ty_args, args)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
@@ -268,17 +298,21 @@ async fn view_function(
 
 async fn submit_transaction(
     State(session): State<AppState>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let txn: aptos_types::transaction::SignedTransaction =
-        bcs::from_bytes(&body).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to deserialize BCS transaction: {}", e),
-            )
-        })?;
+    if session.options.strict_local_auth {
+        require_auth(&headers, &session)?;
+    }
 
-    let tx_hash = format!("0x{}", hex::encode(aptos_crypto::HashValue::sha3_256_of(&body).to_vec()));
+    let txn: aptos_types::transaction::SignedTransaction = bcs::from_bytes(&body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to deserialize BCS transaction: {}", e),
+        )
+    })?;
+
+    let tx_hash = format!("0x{}", hex::encode(txn.committed_hash().to_vec()));
     let sender = format!("0x{}", hex::encode(txn.sender().to_vec()));
     let seq_num = txn.sequence_number().to_string();
     let max_gas = txn.max_gas_amount().to_string();
@@ -286,13 +320,18 @@ async fn submit_transaction(
     let expiration = txn.expiration_timestamp_secs().to_string();
 
     let (vm_status, output) = session
+        .session
         .execute_transaction(txn)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    session.increment_ops();
-    let version = session.get_ops_count().to_string();
+    session.session.increment_ops();
+    let version = session.session.get_ops_count().to_string();
     let success = vm_status == aptos_types::vm_status::VMStatus::Executed;
-    let vm_status_str = if success { "Executed successfully".to_string() } else { format!("{:?}", vm_status) };
+    let vm_status_str = if success {
+        "Executed successfully".to_string()
+    } else {
+        format!("{:?}", vm_status)
+    };
 
     let committed = serde_json::json!({
         "type": "user_transaction",
@@ -309,7 +348,9 @@ async fn submit_transaction(
         "timestamp": "0"
     });
 
-    session.store_transaction(tx_hash.clone(), committed);
+    session
+        .session
+        .store_transaction(tx_hash.clone(), committed);
 
     Ok(Json(serde_json::json!({
         "type": "pending_transaction",
@@ -328,9 +369,12 @@ async fn get_transaction_by_hash(
     State(session): State<AppState>,
     Path(hash): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    match session.get_transaction(&hash) {
+    match session.session.get_transaction(&hash) {
         Some(tx) => Ok(Json(tx)),
-        None => Err((StatusCode::NOT_FOUND, format!("Transaction not found: {}", hash))),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            format!("Transaction not found: {}", hash),
+        )),
     }
 }
 
@@ -338,17 +382,17 @@ async fn simulate_transaction(
     State(session): State<AppState>,
     body: axum::body::Bytes,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let txn: aptos_types::transaction::SignedTransaction =
-        bcs::from_bytes(&body).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to deserialize BCS transaction: {}", e),
-            )
-        })?;
+    let txn: aptos_types::transaction::SignedTransaction = bcs::from_bytes(&body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to deserialize BCS transaction: {}", e),
+        )
+    })?;
 
-    let tx_hash = format!("0x{}", hex::encode(aptos_crypto::HashValue::sha3_256_of(&body).to_vec()));
+    let tx_hash = format!("0x{}", hex::encode(txn.committed_hash().to_vec()));
 
     let (vm_status, output) = session
+        .session
         .simulate_transaction(txn)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -370,14 +414,18 @@ struct MintQuery {
 
 async fn mint(
     State(session): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<MintQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_auth(&headers, &session)?;
+
     let addr = parse_address(&params.address)?;
 
     session
+        .session
         .fund_account(addr, params.amount)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    session.increment_ops();
+    session.session.increment_ops();
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -391,14 +439,13 @@ async fn mint(
 fn serialize_view_arg(v: &serde_json::Value) -> Result<Vec<u8>, (StatusCode, String)> {
     match v {
         serde_json::Value::String(s) => {
-            if let Ok(addr) = AccountAddress::from_hex_literal(s)
-                .or_else(|_| AccountAddress::from_hex(s))
+            if let Ok(addr) =
+                AccountAddress::from_hex_literal(s).or_else(|_| AccountAddress::from_hex(s))
             {
                 bcs::to_bytes(&addr)
                     .map_err(|e| (StatusCode::BAD_REQUEST, format!("BCS error: {}", e)))
             } else {
-                bcs::to_bytes(s)
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("BCS error: {}", e)))
+                bcs::to_bytes(s).map_err(|e| (StatusCode::BAD_REQUEST, format!("BCS error: {}", e)))
             }
         }
         serde_json::Value::Number(n) => {
@@ -406,14 +453,19 @@ fn serialize_view_arg(v: &serde_json::Value) -> Result<Vec<u8>, (StatusCode, Str
                 bcs::to_bytes(&val)
                     .map_err(|e| (StatusCode::BAD_REQUEST, format!("BCS error: {}", e)))
             } else {
-                Err((StatusCode::BAD_REQUEST, format!("Unsupported number: {}", n)))
+                Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("Unsupported number: {}", n),
+                ))
             }
         }
         serde_json::Value::Bool(b) => {
-            bcs::to_bytes(b)
-                .map_err(|e| (StatusCode::BAD_REQUEST, format!("BCS error: {}", e)))
+            bcs::to_bytes(b).map_err(|e| (StatusCode::BAD_REQUEST, format!("BCS error: {}", e)))
         }
-        _ => Err((StatusCode::BAD_REQUEST, format!("Unsupported arg type: {}", v))),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            format!("Unsupported arg type: {}", v),
+        )),
     }
 }
 
@@ -449,13 +501,32 @@ fn parse_function_id(s: &str) -> Result<(ModuleId, Identifier), (StatusCode, Str
 }
 
 fn parse_struct_tag(s: &str) -> Result<StructTag, (StatusCode, String)> {
-    let tag: StructTag =
-        s.parse().map_err(|e: anyhow::Error| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let tag: StructTag = s
+        .parse()
+        .map_err(|e: anyhow::Error| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(tag)
 }
 
 fn parse_type_tag(s: &str) -> Result<TypeTag, (StatusCode, String)> {
-    let tag: TypeTag =
-        s.parse().map_err(|e: anyhow::Error| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let tag: TypeTag = s
+        .parse()
+        .map_err(|e: anyhow::Error| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(tag)
+}
+
+fn require_auth(headers: &HeaderMap, state: &ServerState) -> Result<(), (StatusCode, String)> {
+    let Some(expected) = &state.options.auth_token else {
+        return Ok(());
+    };
+
+    let provided = headers.get("x-mvlite-token").and_then(|v| v.to_str().ok());
+
+    if provided == Some(expected.as_str()) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid x-mvlite-token".to_string(),
+        ))
+    }
 }

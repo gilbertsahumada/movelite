@@ -7,6 +7,7 @@ import {
 } from "@aptos-labs/ts-sdk";
 
 const MVLITE_URL = process.env.MVLITE_URL || "http://127.0.0.1:8090";
+const MVLITE_TOKEN = process.env.MVLITE_TOKEN;
 let passed = 0;
 let failed = 0;
 
@@ -24,6 +25,10 @@ async function test(name: string, fn: () => Promise<void>) {
 
 function assert(condition: boolean, message: string) {
   if (!condition) throw new Error(message);
+}
+
+function mvliteHeaders(): HeadersInit {
+  return MVLITE_TOKEN ? { "x-mvlite-token": MVLITE_TOKEN } : {};
 }
 
 async function main() {
@@ -70,10 +75,23 @@ async function main() {
 
   // --- faucet ---
 
+  await test("POST /mint rejects missing token", async () => {
+    if (!MVLITE_TOKEN) {
+      console.log(`         skipped (MVLITE_TOKEN not set)`);
+      return;
+    }
+    const res = await fetch(
+      `${MVLITE_URL}/mint?address=0x43&amount=1`,
+      { method: "POST" }
+    );
+    assert(res.status === 401, `expected 401, got ${res.status}`);
+    console.log(`         status=${res.status}`);
+  });
+
   await test("POST /mint (fund account)", async () => {
     const res = await fetch(
       `${MVLITE_URL}/mint?address=0x42&amount=1000000000`,
-      { method: "POST" }
+      { method: "POST", headers: mvliteHeaders() }
     );
     assert(res.status === 200, `status ${res.status}`);
     const data = await res.json();
@@ -106,7 +124,7 @@ async function main() {
   await test("Fund test account for tx", async () => {
     const res = await fetch(
       `${MVLITE_URL}/mint?address=${addr}&amount=10000000000`,
-      { method: "POST" }
+      { method: "POST", headers: mvliteHeaders() }
     );
     assert(res.status === 200, `status ${res.status}`);
     console.log(`         funded ${addr.slice(0, 10)}...`);
@@ -126,6 +144,34 @@ async function main() {
     });
     assert(tx !== undefined, "transaction build returned undefined");
     console.log(`         built successfully`);
+  });
+
+  await test("Simulate transaction does not mutate state", async () => {
+    const beforeAccount = await aptos.getAccountInfo({ accountAddress: addr });
+    const tx = await aptos.transaction.build.simple({
+      sender: account.accountAddress,
+      data: {
+        function: "0x1::aptos_account::transfer",
+        typeArguments: [],
+        functionArguments: [
+          "0x0000000000000000000000000000000000000000000000000000000000000042",
+          100,
+        ],
+      },
+    });
+
+    const [simulation] = await aptos.transaction.simulate.simple({
+      signerPublicKey: account.publicKey,
+      transaction: tx,
+    });
+    assert(simulation.success === true, `simulation failed: ${simulation.vm_status}`);
+
+    const afterAccount = await aptos.getAccountInfo({ accountAddress: addr });
+    assert(
+      afterAccount.sequence_number === beforeAccount.sequence_number,
+      `sequence changed ${beforeAccount.sequence_number} -> ${afterAccount.sequence_number}`
+    );
+    console.log(`         seq=${afterAccount.sequence_number}`);
   });
 
   await test("Sign + submit + wait transaction", async () => {
