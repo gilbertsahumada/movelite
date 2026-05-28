@@ -96,6 +96,14 @@ jobs:
             echo "value=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Validate version
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid semver version: $version" >&2
+            exit 1
+          fi
+
       - name: Publish packages
         run: bash scripts/publish-npm.sh "${{ steps.version.outputs.value }}"
         env:
