@@ -9,6 +9,11 @@ set -euo pipefail
 VERSION="$1"
 PLATFORMS=("darwin-arm64" "darwin-x64" "linux-x64" "linux-arm64")
 
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+  echo "Invalid semver version: $VERSION" >&2
+  exit 1
+fi
+
 for platform in "${PLATFORMS[@]}"; do
   binary="artifacts/mvlite-${platform}/mvlite"
   if [ ! -f "$binary" ]; then
@@ -19,16 +24,17 @@ for platform in "${PLATFORMS[@]}"; do
   (cd "build/mvlite-${platform}" && npm publish --access public --provenance)
 done
 
-node -e "
-  const fs = require('fs');
-  const path = 'npm/mvlite/package.json';
-  const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
-  pkg.version = '${VERSION}';
-  for (const k of Object.keys(pkg.optionalDependencies)) {
-    pkg.optionalDependencies[k] = '${VERSION}';
-  }
-  fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
-"
+node - "$VERSION" <<'NODE'
+const fs = require("fs");
+const path = "npm/mvlite/package.json";
+const version = process.argv[2];
+const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+pkg.version = version;
+for (const k of Object.keys(pkg.optionalDependencies)) {
+  pkg.optionalDependencies[k] = version;
+}
+fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+NODE
 
 (cd npm/mvlite && npm publish --access public --provenance)
 
