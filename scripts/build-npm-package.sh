@@ -12,6 +12,24 @@ PLATFORM="$1"
 VERSION="$2"
 BINARY="$3"
 
+case "$PLATFORM" in
+  darwin-arm64|darwin-x64|linux-x64|linux-arm64) ;;
+  *)
+    echo "Unsupported platform: $PLATFORM" >&2
+    exit 1
+    ;;
+esac
+
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+  echo "Invalid semver version: $VERSION" >&2
+  exit 1
+fi
+
+if [ ! -f "$BINARY" ]; then
+  echo "Missing binary: $BINARY" >&2
+  exit 1
+fi
+
 PKG_NAME="mvlite-${PLATFORM}"
 OUT_DIR="build/${PKG_NAME}"
 
