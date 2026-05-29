@@ -22,3 +22,9 @@ movelite start --port 8090
 ```
 
 See [github.com/gilbertsahumada/movelite](https://github.com/gilbertsahumada/movelite) for endpoints and integration with [movehat](https://www.npmjs.com/package/movehat).
+
+## License
+
+Apache 2.0.
+
+The published binary statically links code from [aptos-labs/aptos-core](https://github.com/aptos-labs/aptos-core) at commit `e33e3c1b9e` (November 20, 2025), which was released under the Apache License 2.0. The subsequent license change by Aptos Foundation (November 21, 2025) does not apply retroactively to code published under Apache 2.0.
