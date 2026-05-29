@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Publish mvlite + mvlite-darwin-arm64 from a local macOS arm64 machine.
+# Publish movelite + movelite-darwin-arm64 from a local macOS arm64 machine.
 #
 # This is the bootstrap path used to claim the package names on npm
 # without setting up an NPM_TOKEN in GitHub Actions first. Once these
@@ -60,27 +60,27 @@ else
 fi
 
 echo
-bold "→ Build mvlite binary"
+bold "→ Build movelite binary"
 
-if [ ! -f "target/mvlite" ]; then
-  warn "target/mvlite not found. Building (this can take ~15 min on first run)..."
+if [ ! -f "target/movelite" ]; then
+  warn "target/movelite not found. Building (this can take ~15 min on first run)..."
   bash build.sh
 else
-  ok "target/mvlite exists (skip build; delete the file to force rebuild)"
+  ok "target/movelite exists (skip build; delete the file to force rebuild)"
 fi
-./target/mvlite --help > /dev/null || fail "Binary smoke test failed (--help)"
+./target/movelite --help > /dev/null || fail "Binary smoke test failed (--help)"
 ok "binary smoke test passed"
 
 echo
-bold "→ Stage platform package mvlite-${PLATFORM}@${VERSION}"
-bash scripts/build-npm-package.sh "$PLATFORM" "$VERSION" target/mvlite > /dev/null
-ok "build/mvlite-${PLATFORM}/ ready"
+bold "→ Stage platform package movelite-${PLATFORM}@${VERSION}"
+bash scripts/build-npm-package.sh "$PLATFORM" "$VERSION" target/movelite > /dev/null
+ok "build/movelite-${PLATFORM}/ ready"
 
 echo
-bold "→ Stage main shim mvlite@${VERSION}"
+bold "→ Stage main shim movelite@${VERSION}"
 node - "$VERSION" <<'NODE'
 const fs = require("fs");
-const path = "npm/mvlite/package.json";
+const path = "npm/movelite/package.json";
 const version = process.argv[2];
 const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
 pkg.version = version;
@@ -89,13 +89,13 @@ for (const k of Object.keys(pkg.optionalDependencies)) {
 }
 fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
 NODE
-ok "npm/mvlite/package.json bumped to ${VERSION}"
+ok "npm/movelite/package.json bumped to ${VERSION}"
 
 echo
 bold "→ Pack contents (dry run on both packages)"
-(cd "build/mvlite-${PLATFORM}" && npm pack --dry-run 2>&1 | grep -E "name:|version:|size|total files")
+(cd "build/movelite-${PLATFORM}" && npm pack --dry-run 2>&1 | grep -E "name:|version:|size|total files")
 echo
-(cd npm/mvlite && npm pack --dry-run 2>&1 | grep -E "name:|version:|size|total files")
+(cd npm/movelite && npm pack --dry-run 2>&1 | grep -E "name:|version:|size|total files")
 
 echo
 if [ "$PUBLISH" != "1" ]; then
@@ -116,24 +116,24 @@ warn "About to publish. Press Ctrl-C in 5 seconds to abort."
 sleep 5
 
 echo
-bold "→ Publish mvlite-${PLATFORM}@${VERSION}"
-(cd "build/mvlite-${PLATFORM}" && npm publish --access public)
-ok "mvlite-${PLATFORM}@${VERSION} live"
+bold "→ Publish movelite-${PLATFORM}@${VERSION}"
+(cd "build/movelite-${PLATFORM}" && npm publish --access public)
+ok "movelite-${PLATFORM}@${VERSION} live"
 
 echo
-bold "→ Publish mvlite@${VERSION}"
-(cd npm/mvlite && npm publish --access public)
-ok "mvlite@${VERSION} live"
+bold "→ Publish movelite@${VERSION}"
+(cd npm/movelite && npm publish --access public)
+ok "movelite@${VERSION} live"
 
 echo
 bold "Verify"
-echo "  npm view mvlite version              # expect: ${VERSION}"
-echo "  npm view mvlite-${PLATFORM} version  # expect: ${VERSION}"
+echo "  npm view movelite version              # expect: ${VERSION}"
+echo "  npm view movelite-${PLATFORM} version  # expect: ${VERSION}"
 echo
 warn "Not published (need GHA + native runners or a future local publish from each platform):"
-echo "  - mvlite-darwin-x64@${VERSION}"
-echo "  - mvlite-linux-x64@${VERSION}"
-echo "  - mvlite-linux-arm64@${VERSION}"
+echo "  - movelite-darwin-x64@${VERSION}"
+echo "  - movelite-linux-x64@${VERSION}"
+echo "  - movelite-linux-arm64@${VERSION}"
 echo
 echo "Users on those platforms will get a clean 'missing platform package' error from"
 echo "the shim and can build from source. Cover them in a follow-up release via GHA."

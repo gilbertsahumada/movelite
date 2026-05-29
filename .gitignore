@@ -1,6 +1,11 @@
 .aptos-core/
 .mvlite-session/
+.movelite-session/
 target/
 build/
 node_modules/
 /docs
+
+# Local-only internal docs, never published
+AUDIT_FINDINGS.md
+POSTMORTEM-*.md

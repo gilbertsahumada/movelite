@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Publish mvlite + 4 platform packages to npm at the same version.
-# Expects compiled binaries at artifacts/mvlite-<platform>/mvlite (CI layout).
+# Publish movelite + 4 platform packages to npm at the same version.
+# Expects compiled binaries at artifacts/movelite-<platform>/movelite (CI layout).
 #
 # Usage: publish-npm.sh <version>
 
@@ -15,18 +15,18 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+
 fi
 
 for platform in "${PLATFORMS[@]}"; do
-  binary="artifacts/mvlite-${platform}/mvlite"
+  binary="artifacts/movelite-${platform}/movelite"
   if [ ! -f "$binary" ]; then
     echo "Missing binary: $binary" >&2
     exit 1
   fi
   bash scripts/build-npm-package.sh "$platform" "$VERSION" "$binary"
-  (cd "build/mvlite-${platform}" && npm publish --access public --provenance)
+  (cd "build/movelite-${platform}" && npm publish --access public --provenance)
 done
 
 node - "$VERSION" <<'NODE'
 const fs = require("fs");
-const path = "npm/mvlite/package.json";
+const path = "npm/movelite/package.json";
 const version = process.argv[2];
 const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
 pkg.version = version;
@@ -36,6 +36,6 @@ for (const k of Object.keys(pkg.optionalDependencies)) {
 fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
 NODE
 
-(cd npm/mvlite && npm publish --access public --provenance)
+(cd npm/movelite && npm publish --access public --provenance)
 
-echo "Released mvlite@${VERSION}"
+echo "Released movelite@${VERSION}"

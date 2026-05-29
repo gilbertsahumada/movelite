@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "mvlite", about = "Lightweight Move VM for local development")]
+#[command(name = "movelite", about = "Lightweight Move VM for local development")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -15,7 +15,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the mvlite server
+    /// Start the movelite server
     Start {
         /// Port to listen on
         #[arg(short, long, default_value = "8090")]
@@ -41,7 +41,7 @@ enum Commands {
         #[arg(long)]
         reset: bool,
 
-        /// Token required for mvlite-only mutating endpoints such as /mint
+        /// Token required for movelite-only mutating endpoints such as /mint
         #[arg(long)]
         auth_token: Option<String>,
 
@@ -49,7 +49,7 @@ enum Commands {
         #[arg(long)]
         no_auth: bool,
 
-        /// Require the mvlite auth token for Aptos-compatible mutating endpoints too
+        /// Require the movelite auth token for Aptos-compatible mutating endpoints too
         #[arg(long)]
         strict_local_auth: bool,
     },
@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
             no_auth,
             strict_local_auth,
         } => {
-            eprintln!("mvlite v{}", env!("CARGO_PKG_VERSION"));
+            eprintln!("movelite v{}", env!("CARGO_PKG_VERSION"));
             eprintln!();
 
             let session = session_wrapper::create_session(session_wrapper::SessionOptions {
@@ -92,8 +92,8 @@ async fn main() -> Result<()> {
 
             eprintln!("Starting server on http://127.0.0.1:{}...", port);
             if let Some(token) = &token {
-                eprintln!("mvlite auth token: {}", token);
-                eprintln!("Use header: x-mvlite-token: {}", token);
+                eprintln!("movelite auth token: {}", token);
+                eprintln!("Use header: x-movelite-token: {}", token);
             } else {
                 eprintln!("Local auth disabled.");
             }
@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
             .await
         }
         Commands::Version => {
-            println!("mvlite v{}", env!("CARGO_PKG_VERSION"));
+            println!("movelite v{}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
     }

@@ -1,5 +1,5 @@
 [package]
-name = "mvlite"
+name = "movelite"
 version = "0.1.0"
 edition = "2021"
 description = "Lightweight Move VM for local development — anvil-like experience for Movement L1"

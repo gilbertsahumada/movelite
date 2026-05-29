@@ -3,17 +3,17 @@ const { spawn } = require("child_process");
 const { dirname, join } = require("path");
 
 const PLATFORMS = {
-  "darwin-arm64": "mvlite-darwin-arm64",
-  "darwin-x64": "mvlite-darwin-x64",
-  "linux-x64": "mvlite-linux-x64",
-  "linux-arm64": "mvlite-linux-arm64",
+  "darwin-arm64": "movelite-darwin-arm64",
+  "darwin-x64": "movelite-darwin-x64",
+  "linux-x64": "movelite-linux-x64",
+  "linux-arm64": "movelite-linux-arm64",
 };
 
 const key = `${process.platform}-${process.arch}`;
 const pkg = PLATFORMS[key];
 
 if (!pkg) {
-  console.error(`mvlite: unsupported platform ${key}`);
+  console.error(`movelite: unsupported platform ${key}`);
   console.error(`Supported: ${Object.keys(PLATFORMS).join(", ")}`);
   process.exit(1);
 }
@@ -21,10 +21,10 @@ if (!pkg) {
 let binary;
 try {
   const pkgJson = require.resolve(`${pkg}/package.json`);
-  binary = join(dirname(pkgJson), "bin", "mvlite");
+  binary = join(dirname(pkgJson), "bin", "movelite");
 } catch {
-  console.error(`mvlite: missing platform package "${pkg}"`);
-  console.error(`Reinstall mvlite or run: npm install ${pkg}`);
+  console.error(`movelite: missing platform package "${pkg}"`);
+  console.error(`Reinstall movelite or run: npm install ${pkg}`);
   process.exit(1);
 }
 

@@ -7,7 +7,7 @@ import net from "node:net";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
-const binary = resolve(repoRoot, "target", "mvlite");
+const binary = resolve(repoRoot, "target", "movelite");
 
 async function getFreePort(): Promise<number> {
   return new Promise((resolvePort, reject) => {
@@ -36,7 +36,7 @@ async function waitForReady(url: string): Promise<void> {
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   }
-  throw new Error(`mvlite did not become ready at ${url}`);
+  throw new Error(`movelite did not become ready at ${url}`);
 }
 
 async function runIntegration(env: NodeJS.ProcessEnv): Promise<number> {
@@ -68,7 +68,7 @@ function stop(child: ChildProcess): Promise<void> {
 }
 
 async function main() {
-  if (process.env.MVLITE_URL) {
+  if (process.env.MOVELITE_URL) {
     process.exit(await runIntegration(process.env));
   }
 
@@ -79,7 +79,7 @@ async function main() {
 
   const port = await getFreePort();
   const token = "integration-test-token";
-  const sessionDir = mkdtempSync(resolve(tmpdir(), "mvlite-test-"));
+  const sessionDir = mkdtempSync(resolve(tmpdir(), "movelite-test-"));
   const url = `http://127.0.0.1:${port}`;
 
   const server = spawn(binary, [
@@ -100,8 +100,8 @@ async function main() {
     await waitForReady(url);
     const code = await runIntegration({
       ...process.env,
-      MVLITE_URL: url,
-      MVLITE_TOKEN: token,
+      MOVELITE_URL: url,
+      MOVELITE_TOKEN: token,
     });
     process.exitCode = code;
   } finally {

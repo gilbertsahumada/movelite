@@ -4,9 +4,9 @@ set -euo pipefail
 # Build a platform-specific npm package from a compiled binary.
 #
 # Usage: build-npm-package.sh <platform> <version> <binary-path>
-# Example: build-npm-package.sh darwin-arm64 0.1.0 ./target/mvlite
+# Example: build-npm-package.sh darwin-arm64 0.1.0 ./target/movelite
 #
-# Output: build/mvlite-<platform>/ ready for `npm publish`.
+# Output: build/movelite-<platform>/ ready for `npm publish`.
 
 PLATFORM="$1"
 VERSION="$2"
@@ -30,7 +30,7 @@ if [ ! -f "$BINARY" ]; then
   exit 1
 fi
 
-PKG_NAME="mvlite-${PLATFORM}"
+PKG_NAME="movelite-${PLATFORM}"
 OUT_DIR="build/${PKG_NAME}"
 
 OS="${PLATFORM%-*}"
@@ -38,17 +38,17 @@ ARCH="${PLATFORM#*-}"
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR/bin"
-cp "$BINARY" "$OUT_DIR/bin/mvlite"
-chmod +x "$OUT_DIR/bin/mvlite"
+cp "$BINARY" "$OUT_DIR/bin/movelite"
+chmod +x "$OUT_DIR/bin/movelite"
 
 cat > "$OUT_DIR/package.json" <<EOF
 {
   "name": "${PKG_NAME}",
   "version": "${VERSION}",
-  "description": "Pre-built mvlite binary for ${PLATFORM}",
+  "description": "Pre-built movelite binary for ${PLATFORM}",
   "repository": {
     "type": "git",
-    "url": "https://github.com/gilbertsahumada/mvlite.git"
+    "url": "https://github.com/gilbertsahumada/movelite.git"
   },
   "license": "Apache-2.0",
   "os": ["${OS}"],
@@ -60,9 +60,9 @@ EOF
 cat > "$OUT_DIR/README.md" <<EOF
 # ${PKG_NAME}
 
-Pre-built mvlite binary for \`${PLATFORM}\`.
+Pre-built movelite binary for \`${PLATFORM}\`.
 
-Installed automatically as an optional dependency of [\`mvlite\`](https://www.npmjs.com/package/mvlite). Do not install directly.
+Installed automatically as an optional dependency of [\`movelite\`](https://www.npmjs.com/package/movelite). Do not install directly.
 EOF
 
 echo "Built ${OUT_DIR}"

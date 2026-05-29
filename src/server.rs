@@ -519,14 +519,14 @@ fn require_auth(headers: &HeaderMap, state: &ServerState) -> Result<(), (StatusC
         return Ok(());
     };
 
-    let provided = headers.get("x-mvlite-token").and_then(|v| v.to_str().ok());
+    let provided = headers.get("x-movelite-token").and_then(|v| v.to_str().ok());
 
     if provided == Some(expected.as_str()) {
         Ok(())
     } else {
         Err((
             StatusCode::UNAUTHORIZED,
-            "missing or invalid x-mvlite-token".to_string(),
+            "missing or invalid x-movelite-token".to_string(),
         ))
     }
 }

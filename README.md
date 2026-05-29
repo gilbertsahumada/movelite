@@ -1,10 +1,10 @@
-# mvlite
+# movelite
 
 Lightweight Move VM for local development. An anvil-like experience for Movement L1.
 
 ## What is this?
 
-mvlite embeds the AptosVM directly as a Rust library -- no consensus, no P2P networking, no full node. It exposes an Aptos-compatible REST API so existing tools (movehat, @aptos-labs/ts-sdk) can talk to it without modification.
+movelite embeds the AptosVM directly as a Rust library -- no consensus, no P2P networking, no full node. It exposes an Aptos-compatible REST API so existing tools (movehat, @aptos-labs/ts-sdk) can talk to it without modification.
 
 ```
 Your tests (TypeScript)
@@ -12,7 +12,7 @@ Your tests (TypeScript)
     | HTTP (same REST API as a real node)
     |
     v
-mvlite (this binary)
+movelite (this binary)
     |
     | direct, in-memory
     |
@@ -22,9 +22,9 @@ AptosVM (Move VM)
 
 ## Why?
 
-Movement's local node (`movement node run-localnet`) takes ~15 seconds to boot. mvlite boots in <1 second because it skips consensus, P2P, mempool, and all the infrastructure a real validator needs. For local development and testing, you don't need any of that.
+Movement's local node (`movement node run-localnet`) takes ~15 seconds to boot. movelite boots in <1 second because it skips consensus, P2P, mempool, and all the infrastructure a real validator needs. For local development and testing, you don't need any of that.
 
-| | Movement node | mvlite |
+| | Movement node | movelite |
 |---|---|---|
 | Boot time | ~15s | <1s |
 | Consensus | Full BFT | None (single-process) |
@@ -37,8 +37,8 @@ Movement's local node (`movement node run-localnet`) takes ~15 seconds to boot. 
 ### Install (recommended)
 
 ```bash
-npm install -g mvlite
-mvlite start --port 8090
+npm install -g movelite
+movelite start --port 8090
 ```
 
 Pre-compiled binaries are published to npm for `darwin-arm64`, `darwin-x64`, `linux-x64`, and `linux-arm64`. The right binary is selected automatically via npm's `optionalDependencies`.
@@ -48,21 +48,21 @@ Pre-compiled binaries are published to npm for `darwin-arm64`, `darwin-x64`, `li
 Requires Rust 1.93+ and Git.
 
 ```bash
-git clone https://github.com/gilbertsahumada/mvlite.git
-cd mvlite
+git clone https://github.com/gilbertsahumada/movelite.git
+cd movelite
 ./build.sh
 ```
 
-The build script clones `aptos-core` (pinned to the last Apache 2.0 commit) and compiles mvlite as a workspace member. First build takes ~10-15 minutes; subsequent builds are fast (~3s).
+The build script clones `aptos-core` (pinned to the last Apache 2.0 commit) and compiles movelite as a workspace member. First build takes ~10-15 minutes; subsequent builds are fast (~3s).
 
 ### Run
 
 ```bash
 # Start with clean genesis (no network connection needed)
-./target/mvlite start --port 8090
+./target/movelite start --port 8090
 
 # Or fork from a remote network
-./target/mvlite start --port 8090 --fork-url https://testnet.movementnetwork.xyz/v1
+./target/movelite start --port 8090 --fork-url https://testnet.movementnetwork.xyz/v1
 ```
 
 ### Test
@@ -70,7 +70,7 @@ The build script clones `aptos-core` (pinned to the last Apache 2.0 commit) and 
 ```bash
 # Fund an account
 curl -X POST "http://localhost:8090/mint?address=0x42&amount=1000000000" \
-  -H "x-mvlite-token: <token printed at startup>"
+  -H "x-movelite-token: <token printed at startup>"
 
 # Query account
 curl http://localhost:8090/v1/accounts/0x1
@@ -83,7 +83,7 @@ curl -X POST http://localhost:8090/v1/view \
 
 ## REST API
 
-mvlite implements a subset of the [Aptos REST API](https://aptos.dev/en/build/apis/fullnode-rest-api):
+movelite implements a subset of the [Aptos REST API](https://aptos.dev/en/build/apis/fullnode-rest-api):
 
 | Endpoint | Method | Description | Status |
 |---|---|---|---|
@@ -94,22 +94,22 @@ mvlite implements a subset of the [Aptos REST API](https://aptos.dev/en/build/ap
 | `/v1/view` | POST | Execute view function (BCS args) | Done |
 | `/v1/transactions` | POST | Submit signed transaction (BCS body) | Done |
 | `/v1/transactions/simulate` | POST | Simulate transaction without commit | Done |
-| `/mint` | POST | Fund account (faucet, requires `x-mvlite-token` by default) | Done |
+| `/mint` | POST | Fund account (faucet, requires `x-movelite-token` by default) | Done |
 
 ## Integration with movehat
 
-mvlite is auto-detected by [movehat](https://github.com/gilbertsahumada/movehat) `>=0.2.7`. If a mvlite binary is on `PATH` (or installed via `npm install mvlite`), movehat spawns it instead of the Movement node:
+movelite is auto-detected by [movehat](https://github.com/gilbertsahumada/movehat) `>=0.2.7`. If a movelite binary is on `PATH` (or installed via `npm install movelite`), movehat spawns it instead of the Movement node:
 
 ```typescript
 harness = await Harness.createLocal({ ... });
-// Uses mvlite if available (<1s boot), falls back to Movement node otherwise (~15s).
+// Uses movelite if available (<1s boot), falls back to Movement node otherwise (~15s).
 ```
 
 Opt out per call with `Harness.createLocal({ useMvlite: false })`.
 
 ## How it works
 
-mvlite uses the `aptos-transaction-simulation-session` crate from aptos-core. This crate:
+movelite uses the `aptos-transaction-simulation-session` crate from aptos-core. This crate:
 
 1. **Creates a genesis state** with the full Aptos/Move framework (all `0x1::*` modules)
 2. **Drives the AptosVM directly** -- `execute_transaction()`, `execute_view_function()`, `fund_account()`
@@ -131,4 +131,4 @@ Early development. Not production-ready. Contributions welcome.
 
 - [movehat](https://github.com/gilbertsahumada/movehat) -- Hardhat-like development framework for Movement L1
 - [Anvil](https://book.getfoundry.sh/anvil/) -- The Ethereum equivalent (Foundry's local node)
-- [Movement Network](https://movementnetwork.xyz/) -- The L1 blockchain mvlite targets
+- [Movement Network](https://movementnetwork.xyz/) -- The L1 blockchain movelite targets

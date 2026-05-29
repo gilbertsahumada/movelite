@@ -1,8 +1,8 @@
 {
-  "name": "mvlite-integration-test",
+  "name": "movelite-integration-test",
   "private": true,
   "version": "0.1.0",
-  "description": "SDK integration tests for mvlite",
+  "description": "SDK integration tests for movelite",
   "scripts": {
     "test": "tsx run.ts"
   },

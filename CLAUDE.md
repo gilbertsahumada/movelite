@@ -64,11 +64,11 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## Project-Specific Context
 
-**What is mvlite?** A lightweight Move VM binary that embeds the AptosVM directly (no consensus, no P2P) and exposes an Aptos-compatible REST API. Designed as an anvil-like tool for Movement L1 development.
+**What is movelite?** A lightweight Move VM binary that embeds the AptosVM directly (no consensus, no P2P) and exposes an Aptos-compatible REST API. Designed as an anvil-like tool for Movement L1 development.
 
 ### Key Architecture
 ```
-mvlite (Rust binary)
+movelite (Rust binary)
   ├── src/main.rs              # CLI entry (clap)
   ├── src/server.rs            # axum HTTP server (Aptos REST endpoints)
   └── src/session_wrapper.rs   # Mutex<Session> wrapper over aptos-transaction-simulation-session
@@ -76,10 +76,10 @@ mvlite (Rust binary)
 
 ### Build System
 
-mvlite depends on `aptos-transaction-simulation-session` from aptos-core. Due to workspace-internal deps that can't resolve from outside, the build runs **inside the aptos-core workspace**:
+movelite depends on `aptos-transaction-simulation-session` from aptos-core. Due to workspace-internal deps that can't resolve from outside, the build runs **inside the aptos-core workspace**:
 
 ```bash
-./build.sh  # clones aptos-core, adds mvlite as workspace member, compiles
+./build.sh  # clones aptos-core, adds movelite as workspace member, compiles
 ```
 
 The aptos-core dependency is pinned to commit `e33e3c1b9e` — the last commit under Apache 2.0 before Aptos changed their license on Nov 21, 2025.
@@ -87,8 +87,8 @@ The aptos-core dependency is pinned to commit `e33e3c1b9e` — the last commit u
 ### Key Commands
 ```bash
 ./build.sh                          # Build the binary
-./target/mvlite start --port 8090   # Start server
-./target/mvlite version             # Show version
+./target/movelite start --port 8090   # Start server
+./target/movelite version             # Show version
 ```
 
 ### Release process
@@ -98,9 +98,9 @@ Releases are cut by GitHub Actions (`.github/workflows/release.yml`). Two trigge
 - **`workflow_dispatch`** with a `version` input — for first-of-its-kind releases or hotfixes
 - **`push` of a `v*` tag** — for normal releases (`git tag v0.1.0 && git push --tags`)
 
-Both paths run the same matrix: build mvlite on each of the 4 target platforms (`darwin-{arm64,x64}`, `linux-{x64,arm64}`) using native runners, then a `publish` job downloads the binaries and pushes one platform package per target to npm plus the main `mvlite` shim package.
+Both paths run the same matrix: build movelite on each of the 4 target platforms (`darwin-{arm64,x64}`, `linux-{x64,arm64}`) using native runners, then a `publish` job downloads the binaries and pushes one platform package per target to npm plus the main `movelite` shim package.
 
-The `NPM_TOKEN` repo secret must be set (granular access token, package scope: `mvlite*`). npm provenance is enabled via OIDC.
+The `NPM_TOKEN` repo secret must be set (granular access token, package scope: `movelite*`). npm provenance is enabled via OIDC.
 
 ### License
 Apache 2.0. Uses aptos-core code from the pre-license-change era (commit `e33e3c1b9e`, Nov 20 2025). See LICENSE for details.

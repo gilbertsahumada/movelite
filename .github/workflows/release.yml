@@ -56,16 +56,16 @@ jobs:
           restore-keys: |
             cargo-${{ matrix.target }}-
 
-      - name: Build mvlite
+      - name: Build movelite
         run: bash build.sh
 
       - name: Smoke test
-        run: ./target/mvlite --help
+        run: ./target/movelite --help
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mvlite-${{ matrix.target }}
-          path: target/mvlite
+          name: movelite-${{ matrix.target }}
+          path: target/movelite
           if-no-files-found: error
 
   publish:

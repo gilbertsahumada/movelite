@@ -1,11 +1,11 @@
-# mvlite
+# movelite
 
 Lightweight Move VM for local development — anvil-like experience for Movement L1.
 
 ## Install
 
 ```bash
-npm install -g mvlite
+npm install -g movelite
 ```
 
 The installer pulls a pre-compiled binary for your platform via optional dependencies. Supported:
@@ -18,7 +18,7 @@ The installer pulls a pre-compiled binary for your platform via optional depende
 ## Usage
 
 ```bash
-mvlite start --port 8090
+movelite start --port 8090
 ```
 
-See [github.com/gilbertsahumada/mvlite](https://github.com/gilbertsahumada/mvlite) for endpoints and integration with [movehat](https://www.npmjs.com/package/movehat).
+See [github.com/gilbertsahumada/movelite](https://github.com/gilbertsahumada/movelite) for endpoints and integration with [movehat](https://www.npmjs.com/package/movehat).

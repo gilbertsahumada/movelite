@@ -6,8 +6,8 @@ import {
   Ed25519PrivateKey,
 } from "@aptos-labs/ts-sdk";
 
-const MVLITE_URL = process.env.MVLITE_URL || "http://127.0.0.1:8090";
-const MVLITE_TOKEN = process.env.MVLITE_TOKEN;
+const MOVELITE_URL = process.env.MOVELITE_URL || "http://127.0.0.1:8090";
+const MOVELITE_TOKEN = process.env.MOVELITE_TOKEN;
 let passed = 0;
 let failed = 0;
 
@@ -27,17 +27,17 @@ function assert(condition: boolean, message: string) {
   if (!condition) throw new Error(message);
 }
 
-function mvliteHeaders(): HeadersInit {
-  return MVLITE_TOKEN ? { "x-mvlite-token": MVLITE_TOKEN } : {};
+function moveliteHeaders(): HeadersInit {
+  return MOVELITE_TOKEN ? { "x-movelite-token": MOVELITE_TOKEN } : {};
 }
 
 async function main() {
-  console.log(`\n=== mvlite SDK integration test ===`);
-  console.log(`Target: ${MVLITE_URL}\n`);
+  console.log(`\n=== movelite SDK integration test ===`);
+  console.log(`Target: ${MOVELITE_URL}\n`);
 
   const config = new AptosConfig({
     network: Network.CUSTOM,
-    fullnode: `${MVLITE_URL}/v1`,
+    fullnode: `${MOVELITE_URL}/v1`,
   });
   const aptos = new Aptos(config);
 
@@ -50,7 +50,7 @@ async function main() {
   });
 
   await test("GET /v1/estimate_gas_price", async () => {
-    const res = await fetch(`${MVLITE_URL}/v1/estimate_gas_price`);
+    const res = await fetch(`${MOVELITE_URL}/v1/estimate_gas_price`);
     const data = await res.json();
     assert(data.gas_estimate > 0, `gas_estimate should be > 0`);
     console.log(`         gas_estimate=${data.gas_estimate}`);
@@ -65,7 +65,7 @@ async function main() {
 
   await test("GET /v1/accounts/0x1/resource (Account)", async () => {
     const res = await fetch(
-      `${MVLITE_URL}/v1/accounts/0x1/resource/0x1::account::Account`
+      `${MOVELITE_URL}/v1/accounts/0x1/resource/0x1::account::Account`
     );
     assert(res.status === 200, `status ${res.status}`);
     const data = await res.json();
@@ -76,12 +76,12 @@ async function main() {
   // --- faucet ---
 
   await test("POST /mint rejects missing token", async () => {
-    if (!MVLITE_TOKEN) {
-      console.log(`         skipped (MVLITE_TOKEN not set)`);
+    if (!MOVELITE_TOKEN) {
+      console.log(`         skipped (MOVELITE_TOKEN not set)`);
       return;
     }
     const res = await fetch(
-      `${MVLITE_URL}/mint?address=0x43&amount=1`,
+      `${MOVELITE_URL}/mint?address=0x43&amount=1`,
       { method: "POST" }
     );
     assert(res.status === 401, `expected 401, got ${res.status}`);
@@ -90,8 +90,8 @@ async function main() {
 
   await test("POST /mint (fund account)", async () => {
     const res = await fetch(
-      `${MVLITE_URL}/mint?address=0x42&amount=1000000000`,
-      { method: "POST", headers: mvliteHeaders() }
+      `${MOVELITE_URL}/mint?address=0x42&amount=1000000000`,
+      { method: "POST", headers: moveliteHeaders() }
     );
     assert(res.status === 200, `status ${res.status}`);
     const data = await res.json();
@@ -123,8 +123,8 @@ async function main() {
 
   await test("Fund test account for tx", async () => {
     const res = await fetch(
-      `${MVLITE_URL}/mint?address=${addr}&amount=10000000000`,
-      { method: "POST", headers: mvliteHeaders() }
+      `${MOVELITE_URL}/mint?address=${addr}&amount=10000000000`,
+      { method: "POST", headers: moveliteHeaders() }
     );
     assert(res.status === 200, `status ${res.status}`);
     console.log(`         funded ${addr.slice(0, 10)}...`);

@@ -159,7 +159,7 @@ pub fn create_session(options: SessionOptions) -> Result<SessionWrapper> {
     } else {
         if session_path.exists() && session_path.read_dir()?.next().is_some() {
             anyhow::bail!(
-                "Session directory {} exists but is not a valid mvlite session. Use --reset to replace it.",
+                "Session directory {} exists but is not a valid movelite session. Use --reset to replace it.",
                 session_path.display()
             );
         }
@@ -197,7 +197,7 @@ fn copy_session_file(from_dir: &PathBuf, to_dir: &PathBuf, file_name: &str) -> R
 
 fn make_temp_session_path(kind: &str) -> Result<PathBuf> {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    Ok(std::env::temp_dir().join(format!("mvlite-{}-{}-{}", kind, std::process::id(), nanos)))
+    Ok(std::env::temp_dir().join(format!("movelite-{}-{}-{}", kind, std::process::id(), nanos)))
 }
 
 fn redact_url_for_log(raw: &str) -> String {
