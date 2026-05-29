@@ -83,6 +83,10 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Upgrade npm to >= 11.5.1 for Trusted Publishers
+        # OIDC + provenance only ship in npm >= 11.5.1; Node 20 bundles ~10.x.
+        run: npm install -g npm@latest
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts/
@@ -104,7 +108,8 @@ jobs:
             exit 1
           fi
 
-      - name: Publish packages
+      - name: Publish packages (Trusted Publishers + provenance)
+        # Authenticates via GitHub Actions OIDC (id-token: write). Requires a
+        # Trusted Publisher configured on npmjs.com for each package. No
+        # NPM_TOKEN secret consumed.
         run: bash scripts/publish-npm.sh "${{ steps.version.outputs.value }}"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
