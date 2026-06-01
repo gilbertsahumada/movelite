@@ -59,6 +59,11 @@ jobs:
       - name: Build movelite
         run: bash build.sh
 
+      - name: Strip binary
+        # Strip embedded debug info so the published platform package stays
+        # small (unstripped Linux ELF is ~1.5GB). Native strip per runner.
+        run: strip target/movelite
+
       - name: Smoke test
         run: ./target/movelite --help
 

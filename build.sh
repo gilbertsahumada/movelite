@@ -18,13 +18,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "=== movelite build ==="
 echo ""
 
-# Step 1: Clone aptos-core if not present
-if [ ! -d "$SCRIPT_DIR/$APTOS_CORE_DIR" ]; then
-    echo "Cloning aptos-core at Apache 2.0 commit $APTOS_COMMIT..."
-    git clone --depth 1 https://github.com/aptos-labs/aptos-core.git "$SCRIPT_DIR/$APTOS_CORE_DIR"
+# Step 1: Set up aptos-core if the source clone is not present.
+#
+# Gate on `.git`, not the directory: CI caches `.aptos-core/target` for build
+# speed, and restoring that cache recreates `.aptos-core/` WITHOUT a clone. A
+# bare directory check would then skip cloning, and the remote guard below would
+# resolve `git config remote.origin.url` from movelite's parent .git instead.
+# Clone in place (init + fetch) so a cache-restored `target/` is preserved.
+if [ ! -d "$SCRIPT_DIR/$APTOS_CORE_DIR/.git" ]; then
+    echo "Setting up aptos-core at Apache 2.0 commit $APTOS_COMMIT..."
+    mkdir -p "$SCRIPT_DIR/$APTOS_CORE_DIR"
     cd "$SCRIPT_DIR/$APTOS_CORE_DIR"
+    git init -q
+    git remote add origin https://github.com/aptos-labs/aptos-core.git 2>/dev/null \
+        || git remote set-url origin https://github.com/aptos-labs/aptos-core.git
     git fetch --depth 1 origin "$APTOS_COMMIT"
-    git checkout "$APTOS_COMMIT"
+    git checkout -q FETCH_HEAD
     cd "$SCRIPT_DIR"
     echo "Done."
 else
