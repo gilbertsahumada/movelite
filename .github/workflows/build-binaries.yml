@@ -59,6 +59,13 @@ jobs:
       - name: Build movelite
         run: bash build.sh
 
+      - name: Strip binary
+        # Linux release builds embed full DWARF debug info in the ELF (~1.5GB);
+        # strip removes it so the npm platform package stays small. Each runner's
+        # native strip handles its own object format (ELF on Linux, Mach-O on
+        # macOS). Runs before the smoke test so we validate the stripped binary.
+        run: strip target/movelite
+
       - name: Smoke test
         run: ./target/movelite --help
 
