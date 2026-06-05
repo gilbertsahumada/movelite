@@ -1,0 +1,26 @@
+diff --git a/aptos-move/aptos-transaction-simulation-session/src/session.rs b/aptos-move/aptos-transaction-simulation-session/src/session.rs
+index 703da151..0fc45624 100644
+--- a/aptos-move/aptos-transaction-simulation-session/src/session.rs
++++ b/aptos-move/aptos-transaction-simulation-session/src/session.rs
+@@ -356,6 +356,21 @@ impl Session {
+         Ok((vm_status, txn_output))
+     }
+ 
++    /// Applies a write set produced by an out-of-band execution (e.g. movelite's
++    /// instrumented trace path) to the live state store and persists it, mirroring
++    /// the commit tail of `execute_transaction`. Lets callers run the VM with a
++    /// custom gas meter and still commit through the session.
++    pub fn commit_write_set(
++        &mut self,
++        write_set: &aptos_types::write_set::WriteSet,
++    ) -> Result<()> {
++        self.state_store.apply_write_set(write_set)?;
++        self.config.ops += 1;
++        self.config.save_to_file(&self.path.join("config.json"))?;
++        save_delta(&self.path.join("delta.json"), &self.state_store.delta())?;
++        Ok(())
++    }
++
+     /// Executes a view function and returns the output values.
+     pub fn execute_view_function(
+         &mut self,

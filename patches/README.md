@@ -33,17 +33,29 @@ hook routes each emitted event (type tag + BCS payload) through the gas meter,
 which owns the live frame stack, giving exact attribution. The tracer attaches
 the event to the nearest non-`0x1::event` ancestor frame (Foundry semantics).
 
+## `0002-session-commit-write-set.patch`
+
+Touches `aptos-move/aptos-transaction-simulation-session/src/session.rs`: adds
+`Session::commit_write_set(&mut self, &WriteSet)`, which applies a write set
+produced by an out-of-band execution to the live state store and persists it
+(`config.ops++` + `save_to_file` + `save_delta`) — the same commit tail as
+`execute_transaction`. This lets movelite run the VM with the tracing gas meter
+**and** commit through the session in a single pass (powers
+`POST /transactions/trace?commit=true`). Plain `pub` method, not feature-gated.
+
 ## Reapplying / reversing
 
-```bash
-# Apply (build.sh does this automatically, idempotently):
-git -C .aptos-core apply patches/aptos-core/0001-movelite-trace-hooks.patch
+`build.sh` applies every `patches/aptos-core/*.patch` idempotently after checkout.
 
-# Check whether already applied:
+```bash
+# Apply all patches manually:
+for p in patches/aptos-core/*.patch; do git -C .aptos-core apply "$p"; done
+
+# Check whether a patch is already applied:
 git -C .aptos-core apply --reverse --check patches/aptos-core/0001-movelite-trace-hooks.patch
 
 # Revert to a pristine aptos-core:
-git -C .aptos-core apply --reverse patches/aptos-core/0001-movelite-trace-hooks.patch
+for p in patches/aptos-core/*.patch; do git -C .aptos-core apply --reverse "$p"; done
 ```
 
 ## Regenerating after editing the hooks
@@ -54,4 +66,8 @@ git -C .aptos-core diff -- \
   third_party/move/move-vm/runtime/src/interpreter.rs \
   aptos-move/framework/src/natives/event.rs \
   > patches/aptos-core/0001-movelite-trace-hooks.patch
+
+git -C .aptos-core diff -- \
+  aptos-move/aptos-transaction-simulation-session/src/session.rs \
+  > patches/aptos-core/0002-session-commit-write-set.patch
 ```

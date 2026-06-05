@@ -71,7 +71,7 @@ done
 # Guard against unexpected edits to aptos-core: after the patches are applied,
 # the only diff in tracked source should be the patches themselves (plus the
 # Cargo manifest churn added below for the workspace member).
-if ! git diff --quiet -- ':!Cargo.toml' ':!Cargo.lock' ':!third_party/move/move-vm/types/src/gas.rs' ':!third_party/move/move-vm/runtime/src/interpreter.rs' ':!aptos-move/framework/src/natives/event.rs'; then
+if ! git diff --quiet -- ':!Cargo.toml' ':!Cargo.lock' ':!third_party/move/move-vm/types/src/gas.rs' ':!third_party/move/move-vm/runtime/src/interpreter.rs' ':!aptos-move/framework/src/natives/event.rs' ':!aptos-move/aptos-transaction-simulation-session/src/session.rs'; then
     echo "Cached aptos-core has unexpected uncommitted changes outside the trace patches." >&2
     echo "Clean it or remove $SCRIPT_DIR/$APTOS_CORE_DIR." >&2
     exit 1
