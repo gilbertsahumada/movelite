@@ -7,7 +7,12 @@ import {
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const URL = process.env.MOVELITE_URL!, TOK = process.env.MOVELITE_TOKEN!;
+const URL = process.env.MOVELITE_URL;
+const TOK = process.env.MOVELITE_TOKEN;
+if (!URL || !TOK) {
+  console.error("Missing required env vars: MOVELITE_URL and MOVELITE_TOKEN");
+  process.exit(1);
+}
 const buildDir = resolve(import.meta.dirname, "counter", "build", "counter");
 const aptos = new Aptos(new AptosConfig({ network: Network.CUSTOM, fullnode: `${URL}/v1` }));
 const h = (e: Record<string, string> = {}) => ({ "x-movelite-token": TOK, ...e });
@@ -60,6 +65,27 @@ async function main() {
   ok(r3.success === true && (await counterVal(addr)) === 8, "second commit=true sees prior commit (Counter=8)");
   // and the increment event reflects the committed running total
   ok(r3.root.events?.[0]?.data?.value === "8", "committed event reflects running total (value=8)");
+
+  // discard path: a txn rejected by validation (stale sequence number) must NOT
+  // 500 — it returns a structured {success:false, vm_status}, mutates nothing,
+  // and is not stored.
+  const before = await counterVal(addr);
+  const stale = await aptos.transaction.build.simple({
+    sender: pub.accountAddress,
+    data: { function: `${addr}::counter::increment`, typeArguments: [], functionArguments: [1] },
+    options: { accountSequenceNumber: 0 },
+  });
+  const dRes = await traceReq(stale, pub, "?commit=true");
+  ok(dRes.status === 200, "discarded txn returns 200 (not 500)");
+  const dJson = await dRes.json();
+  ok(dJson.success === false && typeof dJson.vm_status === "string", "discard: success=false + vm_status");
+  ok(dJson.root?.function === "increment", "discard: structured root present");
+  ok((await counterVal(addr)) === before, "discard did not mutate state");
+  // trace?commit=true mirrors submit: a validation-discarded txn still gets a
+  // stored failed record (so waitForTransaction resolves) and bumps the version,
+  // while leaving state unchanged (empty write set).
+  const byHashStale = await fetch(`${URL}/v1/transactions/by_hash/${dJson.txn_hash}`);
+  ok(byHashStale.status === 200, "discarded txn stored as failed record (mirrors submit)");
 
   // commit=false without token is allowed (read-only). The commit=true 401 gate
   // only applies under --strict-local-auth (which also makes the SDK publish
