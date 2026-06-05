@@ -1,0 +1,115 @@
+diff --git a/aptos-move/framework/src/natives/event.rs b/aptos-move/framework/src/natives/event.rs
+index f5a6f61e..93a3b43e 100644
+--- a/aptos-move/framework/src/natives/event.rs
++++ b/aptos-move/framework/src/natives/event.rs
+@@ -16,6 +16,7 @@ use move_binary_format::errors::PartialVMError;
+ use move_core_types::{language_storage::TypeTag, value::MoveTypeLayout, vm_status::StatusCode};
+ use move_vm_runtime::{native_extensions::SessionListener, native_functions::NativeFunction};
+ #[cfg(feature = "testing")]
++use move_vm_types::gas::NativeGasMeter;
+ use move_vm_types::values::{Reference, Struct, StructRef};
+ use move_vm_types::{
+     loaded_data::runtime_types::Type, value_serde::ValueSerDeContext, values::Value,
+@@ -130,6 +131,8 @@ fn native_write_to_event_store(
+         SafeNativeError::InvariantViolation(PartialVMError::new(StatusCode::EVENT_KEY_MISMATCH))
+     })?;
+ 
++    // movelite trace hook: attribute this event to the active call frame.
++    context.gas_meter().record_event(&ty_tag, &blob);
+     let ctx = context.extensions_mut().get_mut::<NativeEventContext>();
+     let event =
+         ContractEvent::new_v1(key, seq_num, ty_tag, blob).map_err(|_| SafeNativeError::Abort {
+@@ -302,6 +305,8 @@ fn native_write_module_event_to_store(
+             ))
+         })?;
+ 
++    // movelite trace hook: attribute this event to the active call frame.
++    context.gas_meter().record_event(&type_tag, &blob);
+     let ctx = context.extensions_mut().get_mut::<NativeEventContext>();
+     let event = ContractEvent::new_v2(type_tag, blob).map_err(|_| SafeNativeError::Abort {
+         abort_code: ECANNOT_CREATE_EVENT,
+diff --git a/third_party/move/move-vm/runtime/src/interpreter.rs b/third_party/move/move-vm/runtime/src/interpreter.rs
+index f9977fd0..57718670 100644
+--- a/third_party/move/move-vm/runtime/src/interpreter.rs
++++ b/third_party/move/move-vm/runtime/src/interpreter.rs
+@@ -348,6 +348,9 @@ where
+ 
+         let num_locals = function.local_tys().len();
+         let mut locals = Locals::new(num_locals);
++        // movelite trace hook: the entry function's args do not flow through
++        // `charge_call`, so surface them (with the function identity) here.
++        gas_meter.record_entry_args(function.module_id(), function.name(), args.iter());
+         for (i, value) in args.into_iter().enumerate() {
+             locals
+                 .store_loc(i, value)
+@@ -419,6 +422,16 @@ where
+                         .exit_function(&current_frame.function)
+                         .map_err(|e| set_err_info!(current_frame, e))?;
+ 
++                    // movelite trace hook: record this Move frame's return values
++                    // (which sit on top of the shared operand stack) before the
++                    // frame is popped. Non-fatal: skipped if the peek fails.
++                    {
++                        let num_returns = current_frame.function.return_tys().len();
++                        if let Ok(ret_vals) = self.operand_stack.last_n(num_returns) {
++                            gas_meter.record_move_return(ret_vals);
++                        }
++                    }
++
+                     if let Some(frame) = self.call_stack.pop() {
+                         self.reentrancy_checker
+                             .exit_function(
+diff --git a/third_party/move/move-vm/types/src/gas.rs b/third_party/move/move-vm/types/src/gas.rs
+index d7cb8e94..89ec6ff4 100644
+--- a/third_party/move/move-vm/types/src/gas.rs
++++ b/third_party/move/move-vm/types/src/gas.rs
+@@ -10,7 +10,7 @@ use move_core_types::{
+     account_address::AccountAddress,
+     gas_algebra::{InternalGas, NumArgs, NumBytes, NumTypeNodes},
+     identifier::IdentStr,
+-    language_storage::ModuleId,
++    language_storage::{ModuleId, TypeTag},
+ };
+ 
+ /// Enum of instructions that do not need extra information for gas metering.
+@@ -203,6 +203,11 @@ pub trait NativeGasMeter: DependencyGasMeter {
+ 
+     /// Tracks heap memory usage.
+     fn use_heap_memory_in_native_context(&mut self, amount: u64) -> PartialVMResult<()>;
++
++    /// movelite trace hook (default no-op). Called by the event emission native
++    /// after building a `ContractEvent`, so a tracing gas meter can attribute the
++    /// event (type tag + BCS payload) to the currently active call frame.
++    fn record_event(&mut self, _ty_tag: &TypeTag, _data: &[u8]) {}
+ }
+ 
+ /// Trait that defines a generic gas meter interface, allowing clients of the Move VM to implement
+@@ -387,6 +392,28 @@ pub trait GasMeter: NativeGasMeter {
+     ) -> PartialVMResult<()>;
+ 
+     fn charge_create_ty(&mut self, num_nodes: NumTypeNodes) -> PartialVMResult<()>;
++
++    /// movelite trace hook (default no-op). Called when a non-native Move frame
++    /// is about to return, with the frame's return values still on top of the
++    /// operand stack, so a tracing gas meter can record them.
++    fn record_move_return(
++        &mut self,
++        _ret_vals: impl ExactSizeIterator<Item = impl ValueView> + Clone,
++    ) {
++    }
++
++    /// movelite trace hook (default no-op). Called at every interpreter entry
++    /// (prologue, main payload, epilogue) with the executing function's identity
++    /// and its decoded arguments (which do not flow through `charge_call`). A
++    /// tracing gas meter uses the identity to record args only for the genuine
++    /// entry frame.
++    fn record_entry_args(
++        &mut self,
++        _module_id: Option<&ModuleId>,
++        _name: &str,
++        _args: impl ExactSizeIterator<Item = impl ValueView> + Clone,
++    ) {
++    }
+ }
+ 
+ /// A dummy gas meter that does not meter anything.
