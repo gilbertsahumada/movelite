@@ -1,14 +1,13 @@
 name: Release
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
         description: "Version to release (no v prefix, e.g. 0.1.0)"
         required: true
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: read
@@ -96,22 +95,28 @@ jobs:
         with:
           path: artifacts/
 
-      - name: Resolve version
+      - name: Resolve and validate version
         id: version
+        # Read both raw inputs via `env:` (never inline `${{ }}` into the
+        # script) so a poisoned release tag / dispatch input can't break out of
+        # this step's shell. Strip a leading `v` from release tags, then enforce
+        # strict semver before any downstream step (publish-npm.sh) consumes it.
+        env:
+          RAW_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RAW_DISPATCH_VERSION: ${{ github.event.inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "release" ]; then
+            VERSION="${RAW_RELEASE_TAG#v}"
           else
-            echo "value=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+            VERSION="$RAW_DISPATCH_VERSION"
           fi
-
-      - name: Validate version
-        run: |
-          version="${{ steps.version.outputs.value }}"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-            echo "Invalid semver version: $version" >&2
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Resolved version '$VERSION' is not valid semver." >&2
             exit 1
           fi
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $VERSION"
 
       - name: Publish packages (Trusted Publishers + provenance)
         # Authenticates via GitHub Actions OIDC (id-token: write). Requires a

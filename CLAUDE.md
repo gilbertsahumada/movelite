@@ -95,12 +95,15 @@ The aptos-core dependency is pinned to commit `e33e3c1b9e` — the last commit u
 
 Releases are cut by GitHub Actions (`.github/workflows/release.yml`). Two triggers:
 
-- **`workflow_dispatch`** with a `version` input — for first-of-its-kind releases or hotfixes
-- **`push` of a `v*` tag** — for normal releases (`git tag v0.1.0 && git push --tags`)
+- **`release` published** — for normal releases. Cut a GitHub Release and the
+  workflow publishes the released tag (`gh release create v0.1.0 --generate-notes`).
+  A bare `git push --tags` does **not** publish — only publishing a Release does.
+- **`workflow_dispatch`** with a `version` input — for hotfixes or re-runs without
+  a Release (builds the current default branch at the given version).
 
-Both paths run the same matrix: build movelite on each of the 4 target platforms (`darwin-{arm64,x64}`, `linux-{x64,arm64}`) using native runners, then a `publish` job downloads the binaries and pushes one platform package per target to npm plus the main `movelite` shim package.
+Both paths run the same matrix: build movelite on each of the 4 target platforms (`darwin-{arm64,x64}`, `linux-{x64,arm64}`) using native runners, then a `publish` job downloads the binaries and pushes one platform package per target to npm plus the main `movelite` shim package. A prerelease version (`0.2.0-rc.1`) publishes under the `next` dist-tag instead of `latest`.
 
-The `NPM_TOKEN` repo secret must be set (granular access token, package scope: `movelite*`). npm provenance is enabled via OIDC.
+Publishing authenticates via npm **Trusted Publishers** (GitHub Actions OIDC, `id-token: write`) — no `NPM_TOKEN` secret. Each of the 5 packages (`movelite` + the 4 `movelite-<platform>`) needs a Trusted Publisher on npmjs.com bound to the workflow file `release.yml`. npm provenance is enabled.
 
 ### License
 Apache 2.0. Uses aptos-core code from the pre-license-change era (commit `e33e3c1b9e`, Nov 20 2025). See LICENSE for details.
