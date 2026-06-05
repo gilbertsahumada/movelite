@@ -5,6 +5,12 @@ edition = "2021"
 description = "Lightweight Move VM for local development — anvil-like experience for Movement L1"
 license = "Apache-2.0"
 
+[features]
+# Enables the `record_move_return` / `record_event` tracer hooks that depend on
+# the move-vm fork patches (patches/aptos-core). Off by default so movelite
+# compiles against a vanilla aptos-core checkout.
+trace_patches = []
+
 [dependencies]
 aptos-transaction-simulation-session = { path = "../.aptos-core/aptos-move/aptos-transaction-simulation-session" }
 aptos-transaction-simulation = { workspace = true }
@@ -12,6 +18,16 @@ aptos-types = { workspace = true }
 aptos-crypto = { workspace = true }
 aptos-api-types = { workspace = true }
 move-core-types = { workspace = true }
+# Tracing (POST /transactions/trace) dependencies.
+aptos-gas-algebra = { workspace = true }
+aptos-gas-meter = { workspace = true }
+aptos-vm = { workspace = true }
+aptos-vm-types = { workspace = true }
+aptos-vm-environment = { workspace = true }
+aptos-vm-logging = { workspace = true }
+aptos-resource-viewer = { workspace = true }
+move-binary-format = { workspace = true }
+move-vm-types = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
