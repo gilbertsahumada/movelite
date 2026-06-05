@@ -1,3 +1,4 @@
+use crate::trace::{build_response, TraceResponse, TracerMeter};
 use anyhow::Result;
 use aptos_transaction_simulation::SimulationStateStore;
 use aptos_transaction_simulation_session::Session;
@@ -5,8 +6,15 @@ use aptos_types::account_address::AccountAddress;
 use aptos_types::chain_id::ChainId;
 use aptos_types::state_store::state_key::StateKey;
 use aptos_types::state_store::TStateView;
-use aptos_types::transaction::{SignedTransaction, TransactionOutput};
+use aptos_types::transaction::{
+    AuxiliaryInfo, EntryFunction, PersistedAuxiliaryInfo, SignedTransaction, TransactionExecutable,
+    TransactionOutput, TransactionPayload, TransactionPayloadInner,
+};
 use aptos_types::vm_status::VMStatus;
+use aptos_vm::{data_cache::AsMoveResolver, AptosVM};
+use aptos_vm_environment::environment::AptosEnvironment;
+use aptos_vm_logging::log_schema::AdapterLogSchema;
+use aptos_vm_types::module_and_script_storage::AsAptosCodeStorage;
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::{ModuleId, StructTag, TypeTag};
 use std::collections::HashMap;
@@ -103,6 +111,77 @@ impl SessionWrapper {
         }
     }
 
+    /// Executes a transaction through the instrumented (tracing) VM path and
+    /// returns the Foundry-style call trace.
+    ///
+    /// - `commit == false` (default): runs on a throwaway clone of the session,
+    ///   like `simulate_transaction` — never mutates state.
+    /// - `commit == true`: runs on the live session and commits the write set in
+    ///   a single pass (same state effect as `submit`), so callers get the trace
+    ///   tree AND the committed result without re-executing.
+    pub fn execute_transaction_traced(
+        &self,
+        txn: SignedTransaction,
+        commit: bool,
+    ) -> Result<TraceResponse> {
+        if commit {
+            self.execute_transaction_traced_commit(txn)
+        } else {
+            self.execute_transaction_traced_dry(txn)
+        }
+    }
+
+    fn execute_transaction_traced_dry(&self, txn: SignedTransaction) -> Result<TraceResponse> {
+        let temp_path = make_temp_session_path("trace")?;
+        std::fs::create_dir_all(&temp_path)?;
+
+        let result = (|| {
+            {
+                let _session_guard = self.inner.lock().unwrap();
+                copy_session_file(&self.session_path, &temp_path, "config.json")?;
+                copy_session_file(&self.session_path, &temp_path, "delta.json")?;
+            }
+            let session = Session::load(&temp_path)?;
+            let (_output, response) = trace_on(&session, &txn)?;
+            Ok(response)
+        })();
+
+        let cleanup_result = std::fs::remove_dir_all(&temp_path);
+        match (result, cleanup_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(_), Err(e)) => Err(anyhow::anyhow!(
+                "trace completed but failed to remove temp session {}: {}",
+                temp_path.display(),
+                e
+            )),
+            (Err(e), _) => Err(e),
+        }
+    }
+
+    fn execute_transaction_traced_commit(&self, txn: SignedTransaction) -> Result<TraceResponse> {
+        // Hold the session lock across the commit AND the version/record
+        // bookkeeping so the stored `version`, the by_hash record, and the
+        // `x-aptos-ledger-version` headers can't be reordered by a concurrent
+        // committing request. (Lock order inner -> ops_count/tx_store is safe: no
+        // path takes them in the reverse order.) The instrumented run is held
+        // under the lock for its whole duration — this is intentionally not a
+        // fast path.
+        let mut session = self.inner.lock().unwrap();
+        let (output, response) = trace_on(&session, &txn)?;
+        if let Some(output) = output {
+            // Executed (kept): commit the write set (gas + state) like `submit`,
+            // regardless of success — aborted txns still consume gas and bump the
+            // sequence number. Then mirror submit's bookkeeping so
+            // GET /transactions/by_hash resolves the committed trace.
+            session.commit_write_set(output.write_set())?;
+            self.increment_ops();
+            let record = build_committed_record(&txn, &response, self.get_ops_count());
+            self.store_transaction(response.txn_hash.clone(), record);
+        }
+        // None = discarded by validation: never executed; nothing to commit or store.
+        Ok(response)
+    }
+
     pub fn store_transaction(&self, hash: String, result: serde_json::Value) {
         let mut store = self.tx_store.lock().unwrap();
         if store.len() >= 10_000 {
@@ -188,6 +267,168 @@ pub fn create_session(options: SessionOptions) -> Result<SessionWrapper> {
     let chain_id = session.state_store().get_chain_id()?.id() as u64;
     eprintln!("Session ready at {}.", session_path.display());
     Ok(SessionWrapper::new(session, session_path, chain_id))
+}
+
+/// Entry-frame seed extracted from the transaction payload (the entry function
+/// produces no `charge_call`, so the tracer must be pre-seeded with it).
+struct EntrySeed {
+    module: Option<ModuleId>,
+    function: Option<Identifier>,
+    ty_args: Vec<TypeTag>,
+    is_script: bool,
+    /// User-provided arg count (excludes VM-injected leading `&signer`s).
+    user_arg_count: usize,
+}
+
+fn extract_entry(txn: &SignedTransaction) -> EntrySeed {
+    fn from_ef(ef: &EntryFunction) -> EntrySeed {
+        EntrySeed {
+            module: Some(ef.module().clone()),
+            function: Some(ef.function().to_owned()),
+            ty_args: ef.ty_args().to_vec(),
+            is_script: false,
+            user_arg_count: ef.args().len(),
+        }
+    }
+    // For scripts, the user args are the `Script::args()` (signers are injected
+    // separately and not counted there), so stripping leading signers works the
+    // same way as for entry functions.
+    fn script_seed(user_arg_count: usize) -> EntrySeed {
+        EntrySeed {
+            module: None,
+            function: None,
+            ty_args: vec![],
+            is_script: true,
+            user_arg_count,
+        }
+    }
+    // Truly-unknown payloads (multisig/module-bundle/encrypted): don't strip.
+    let unknown = script_seed(usize::MAX);
+    match txn.payload() {
+        TransactionPayload::EntryFunction(ef) => from_ef(ef),
+        TransactionPayload::Script(s) => script_seed(s.args().len()),
+        TransactionPayload::Payload(TransactionPayloadInner::V1 { executable, .. }) => {
+            match executable {
+                TransactionExecutable::EntryFunction(ef) => from_ef(ef),
+                TransactionExecutable::Script(s) => script_seed(s.args().len()),
+                _ => unknown,
+            }
+        },
+        _ => unknown,
+    }
+}
+
+/// Replicates `Session::execute_transaction`'s VM wiring (session.rs:271-293)
+/// but routes through `execute_user_transaction_with_modified_gas_meter` with a
+/// `TracerMeter`, preserving production gas behavior.
+///
+/// Returns `(Some(output), response)` for an executed (kept) transaction so the
+/// caller can commit the write set, or `(None, response)` for a transaction
+/// discarded by validation/prologue (bad sequence number, expired, insufficient
+/// gas for the intrinsic, …) — which never executed, so there is nothing to
+/// commit. The discard still yields a structured response (entry frame only,
+/// `success:false`) rather than an error, mirroring `submit_transaction`.
+fn trace_on(
+    session: &Session,
+    txn: &SignedTransaction,
+) -> Result<(Option<TransactionOutput>, TraceResponse)> {
+    let tx_hash = format!("0x{}", hex::encode(txn.committed_hash().to_vec()));
+    let seed = extract_entry(txn);
+
+    let state_store = session.state_store();
+    let env = AptosEnvironment::new(state_store);
+    let vm = AptosVM::new(&env, state_store);
+    let log_context = AdapterLogSchema::new(state_store.id(), 0);
+    let resolver = state_store.as_move_resolver();
+    let code_storage = state_store.as_aptos_code_storage(&env);
+
+    let aux = AuxiliaryInfo::new(
+        PersistedAuxiliaryInfo::V1 {
+            transaction_index: 0,
+        },
+        None,
+    );
+
+    let exec = vm.execute_user_transaction_with_modified_gas_meter(
+        &resolver,
+        &code_storage,
+        txn,
+        &log_context,
+        |prod| {
+            if seed.is_script {
+                TracerMeter::new_script(prod, seed.user_arg_count)
+            } else {
+                TracerMeter::new_function(
+                    prod,
+                    seed.module.clone().expect("entry function has a module"),
+                    seed.function.clone().expect("entry function has a name"),
+                    seed.ty_args.clone(),
+                    seed.user_arg_count,
+                )
+            }
+        },
+        &aux,
+    );
+
+    let (vm_status, vm_output, meter) = match exec {
+        Ok(triple) => triple,
+        Err(status) => {
+            // Discarded before execution — return a structured response (entry
+            // frame only), not an error.
+            let root = crate::trace::entry_stub(
+                seed.module.clone(),
+                seed.function.clone(),
+                seed.ty_args.clone(),
+            );
+            let response = build_response(tx_hash, &status, 0, root, vec![]);
+            return Ok((None, response));
+        },
+    };
+
+    let txn_output = vm_output
+        .try_materialize_into_transaction_output(&resolver)
+        .map_err(|status| anyhow::anyhow!("failed to materialize trace output: {:?}", status))?;
+    let gas_used = txn_output.gas_used();
+
+    let (mut root, abort_stack) = meter.finish();
+
+    // Decode per-frame event payloads (TypeTag + BCS) to named JSON, using the
+    // same annotator the REST API uses for resources/events. Falls back to hex.
+    let annotator = aptos_resource_viewer::AptosValueAnnotator::new(state_store);
+    let decode = |tag: &TypeTag, blob: &[u8]| -> serde_json::Value {
+        let decoded: anyhow::Result<serde_json::Value> = annotator
+            .view_value(tag, blob)
+            .and_then(|av| Ok(aptos_api_types::MoveValue::try_from(av)?))
+            .and_then(|mv| mv.json());
+        decoded.unwrap_or_else(|_| serde_json::Value::String(format!("0x{}", hex::encode(blob))))
+    };
+    crate::trace::decode_events_in_tree(&mut root, &decode);
+
+    let response = build_response(tx_hash, &vm_status, gas_used, root, abort_stack);
+    Ok((Some(txn_output), response))
+}
+
+/// Builds the committed-transaction record stored for GET /transactions/by_hash,
+/// matching the shape `submit_transaction` produces.
+fn build_committed_record(
+    txn: &SignedTransaction,
+    response: &TraceResponse,
+    version: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "user_transaction",
+        "hash": response.txn_hash,
+        "success": response.success,
+        "vm_status": response.vm_status,
+        "version": version.to_string(),
+        "sender": format!("0x{}", hex::encode(txn.sender().to_vec())),
+        "sequence_number": txn.sequence_number().to_string(),
+        "max_gas_amount": txn.max_gas_amount().to_string(),
+        "gas_unit_price": txn.gas_unit_price().to_string(),
+        "expiration_timestamp_secs": txn.expiration_timestamp_secs().to_string(),
+        "gas_used": response.gas_used.to_string(),
+        "timestamp": "0"
+    })
 }
 
 fn copy_session_file(from_dir: &PathBuf, to_dir: &PathBuf, file_name: &str) -> Result<()> {

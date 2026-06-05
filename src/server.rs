@@ -2,9 +2,10 @@ use crate::session_wrapper::SessionWrapper;
 use anyhow::Result;
 use aptos_types::account_address::AccountAddress;
 use axum::{
-    extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::Json,
+    extract::{Path, Query, Request, State},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
+    middleware::{self, Next},
+    response::{Json, Response},
     routing::{get, post},
     Router,
 };
@@ -41,6 +42,7 @@ pub async fn run(session: SessionWrapper, port: u16, options: ServerOptions) -> 
         .route("/view", post(view_function))
         .route("/transactions", post(submit_transaction))
         .route("/transactions/simulate", post(simulate_transaction))
+        .route("/transactions/trace", post(trace_transaction))
         .route("/transactions/by_hash/:hash", get(get_transaction_by_hash))
         .route(
             "/transactions/wait_by_hash/:hash",
@@ -51,6 +53,10 @@ pub async fn run(session: SessionWrapper, port: u16, options: ServerOptions) -> 
         .route("/v1/", get(ledger_info))
         .nest("/v1", v1)
         .route("/mint", post(mint))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            inject_ledger_headers,
+        ))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
@@ -74,12 +80,19 @@ struct LedgerInfoResponse {
 
 fn build_ledger_info(state: &ServerState) -> LedgerInfoResponse {
     let ops = state.session.get_ops_count();
+    // Report real wall-clock microseconds. The Movement CLI derives a
+    // transaction expiration from the ledger timestamp; a zero timestamp
+    // makes that arithmetic underflow ("attempt to subtract with overflow").
+    let now_usec = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0);
     LedgerInfoResponse {
         chain_id: state.session.get_chain_id(),
         epoch: "1".to_string(),
         ledger_version: ops.to_string(),
         oldest_ledger_version: "0".to_string(),
-        ledger_timestamp: "0".to_string(),
+        ledger_timestamp: now_usec.to_string(),
         node_role: "full_node".to_string(),
         oldest_block_height: "0".to_string(),
         block_height: ops.to_string(),
@@ -88,6 +101,36 @@ fn build_ledger_info(state: &ServerState) -> LedgerInfoResponse {
 
 async fn ledger_info(State(session): State<AppState>) -> Json<LedgerInfoResponse> {
     Json(build_ledger_info(&session))
+}
+
+/// Attach the `X-Aptos-*` ledger-state headers to every response. The Aptos
+/// REST client (used by the Movement CLI for `move publish` etc.) builds its
+/// State from these response headers, not the JSON body; without them it fails
+/// with "Failed to build State from headers". Computed after the handler runs
+/// so the version reflects any state change (e.g. a committed transaction).
+async fn inject_ledger_headers(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let mut response = next.run(req).await;
+    let info = build_ledger_info(&state);
+    let headers = response.headers_mut();
+    let pairs = [
+        ("x-aptos-chain-id", info.chain_id.to_string()),
+        ("x-aptos-ledger-version", info.ledger_version),
+        ("x-aptos-ledger-oldest-version", info.oldest_ledger_version),
+        ("x-aptos-ledger-timestampusec", info.ledger_timestamp),
+        ("x-aptos-epoch", info.epoch),
+        ("x-aptos-block-height", info.block_height),
+        ("x-aptos-oldest-block-height", info.oldest_block_height),
+    ];
+    for (name, value) in pairs {
+        if let Ok(v) = HeaderValue::from_str(&value) {
+            headers.insert(HeaderName::from_static(name), v);
+        }
+    }
+    response
 }
 
 async fn estimate_gas_price() -> Json<serde_json::Value> {
@@ -404,6 +447,48 @@ async fn simulate_transaction(
         "success": success,
         "gas_used": output.gas_used().to_string(),
     })]))
+}
+
+#[derive(Deserialize)]
+struct TraceParams {
+    /// When true, also commit the transaction (single-pass trace + submit).
+    /// Defaults to false (simulate-like, read-only).
+    commit: Option<bool>,
+}
+
+/// Opt-in Foundry-style execution trace. Accepts a BCS-signed transaction just
+/// like submit/simulate and executes it through the instrumented VM path,
+/// returning the call tree. With `?commit=true` it also commits the result in a
+/// single pass (and is auth-gated like submit). The normal submit/simulate paths
+/// do not pay the tracing overhead.
+async fn trace_transaction(
+    State(session): State<AppState>,
+    Query(params): Query<TraceParams>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let commit = params.commit.unwrap_or(false);
+
+    let txn: aptos_types::transaction::SignedTransaction = bcs::from_bytes(&body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to deserialize BCS transaction: {}", e),
+        )
+    })?;
+
+    // Committing mutates state, so gate it like submit_transaction.
+    if commit && session.options.strict_local_auth {
+        require_auth(&headers, &session)?;
+    }
+
+    let trace = session
+        .session
+        .execute_transaction_traced(txn, commit)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    serde_json::to_value(trace)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 #[derive(Deserialize)]

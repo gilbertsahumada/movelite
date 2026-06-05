@@ -50,8 +50,30 @@ if [ "$(git rev-parse HEAD)" != "$APTOS_COMMIT" ]; then
     echo "Current: $(git rev-parse HEAD)" >&2
     exit 1
 fi
-if ! git diff --quiet || ! git diff --cached --quiet; then
-    echo "Cached aptos-core has uncommitted changes. Clean it or remove $SCRIPT_DIR/$APTOS_CORE_DIR." >&2
+# Apply movelite's trace hooks to aptos-core (idempotent). These add the
+# move-vm/framework callbacks the tracing gas meter relies on (POST
+# /transactions/trace). The hooks are inert default no-ops for every other gas
+# meter, so this does not change normal execution. See patches/README.md.
+for PATCH in "$SCRIPT_DIR"/patches/aptos-core/*.patch; do
+    [ -e "$PATCH" ] || continue
+    if git apply --reverse --check "$PATCH" 2>/dev/null; then
+        echo "Trace patch already applied: $(basename "$PATCH")"
+    elif git apply --check "$PATCH" 2>/dev/null; then
+        git apply "$PATCH"
+        echo "Applied trace patch: $(basename "$PATCH")"
+    else
+        echo "Trace patch does not apply cleanly: $(basename "$PATCH")" >&2
+        echo "Clean it or remove $SCRIPT_DIR/$APTOS_CORE_DIR and rebuild." >&2
+        exit 1
+    fi
+done
+
+# Guard against unexpected edits to aptos-core: after the patches are applied,
+# the only diff in tracked source should be the patches themselves (plus the
+# Cargo manifest churn added below for the workspace member).
+if ! git diff --quiet -- ':!Cargo.toml' ':!Cargo.lock' ':!third_party/move/move-vm/types/src/gas.rs' ':!third_party/move/move-vm/runtime/src/interpreter.rs' ':!aptos-move/framework/src/natives/event.rs' ':!aptos-move/aptos-transaction-simulation-session/src/session.rs'; then
+    echo "Cached aptos-core has unexpected uncommitted changes outside the trace patches." >&2
+    echo "Clean it or remove $SCRIPT_DIR/$APTOS_CORE_DIR." >&2
     exit 1
 fi
 
@@ -84,7 +106,7 @@ echo ""
 echo "Building movelite..."
 BUILD_LOG="$SCRIPT_DIR/target/movelite-build.log"
 mkdir -p "$SCRIPT_DIR/target"
-if ! cargo build -p movelite --release > "$BUILD_LOG" 2>&1; then
+if ! cargo build -p movelite --release --features trace_patches > "$BUILD_LOG" 2>&1; then
     cat "$BUILD_LOG" >&2
     exit 1
 fi
