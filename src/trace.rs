@@ -101,7 +101,10 @@ pub struct CallNode {
     pub args: Vec<TracedArg>,
     #[serde(rename = "return")]
     pub ret: Vec<TracedArg>,
-    pub gas: u64, // SELF gas (bytecode + native), excluding children
+    /// SELF gas of this frame (bytecode + native), excluding children. NOTE: this
+    /// is in **internal** VM gas units, which are much larger than and not
+    /// directly comparable to the external octa `gas_used` on the response.
+    pub gas: u64,
     pub events: Vec<TracedEvent>,
     pub storage: Vec<StorageOp>,
     pub children: Vec<CallNode>,
@@ -164,6 +167,20 @@ fn format_module_id(id: &ModuleId) -> String {
     format!("{}::{}", id.address().to_hex_literal(), id.name())
 }
 
+/// Builds a bare root node for a transaction that never executed (e.g. discarded
+/// by validation before the VM ran). The tree is just the entry frame — no args,
+/// return, events, storage or children.
+pub fn entry_stub(
+    module: Option<ModuleId>,
+    function: Option<Identifier>,
+    ty_args: Vec<TypeTag>,
+) -> CallNode {
+    match (module, function) {
+        (Some(m), Some(f)) => FrameBuilder::function(m, f, ty_args).node,
+        _ => FrameBuilder::script().node,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The tracer gas meter.
 // ---------------------------------------------------------------------------
@@ -208,6 +225,9 @@ impl<G> TracerMeter<G>
 where
     G: AptosGasMeter,
 {
+    // Invariant: `frames` is never empty. It is seeded with the root frame at
+    // construction; `pop_into_parent` guards `len > 1`, and `finish` consumes
+    // down to exactly the root. So the `expect`/`unwrap` below cannot fire.
     fn active(&mut self) -> &mut FrameBuilder {
         self.frames.last_mut().expect("frame stack never empty")
     }
@@ -413,13 +433,18 @@ where
         let decoded: Vec<TracedArg> = args.clone().map(decode_value).collect();
         // CALL bytecode cost belongs to the caller (still the active frame).
         let res = self.charge_to_active(|base| base.charge_call(module_id, func_name, args, num_locals));
-        let mut frame = FrameBuilder::function(
-            module_id.clone(),
-            Identifier::new(func_name).unwrap_or_else(|_| Identifier::new("unknown").unwrap()),
-            vec![],
-        );
-        frame.node.args = decoded;
-        self.frames.push(frame);
+        // Only push the callee frame if the charge succeeded; on out-of-gas the
+        // interpreter never enters the callee, so a pushed frame would be a
+        // phantom in the partial tree / abort stack.
+        if res.is_ok() {
+            let mut frame = FrameBuilder::function(
+                module_id.clone(),
+                Identifier::new(func_name).unwrap_or_else(|_| Identifier::new("unknown").unwrap()),
+                vec![],
+            );
+            frame.node.args = decoded;
+            self.frames.push(frame);
+        }
         res
     }
 
@@ -436,13 +461,16 @@ where
         let res = self.charge_to_active(|base| {
             base.charge_call_generic(module_id, func_name, ty_args, args, num_locals)
         });
-        let mut frame = FrameBuilder::function(
-            module_id.clone(),
-            Identifier::new(func_name).unwrap_or_else(|_| Identifier::new("unknown").unwrap()),
-            ty_tags,
-        );
-        frame.node.args = decoded;
-        self.frames.push(frame);
+        // Only push the callee frame if the charge succeeded (see `charge_call`).
+        if res.is_ok() {
+            let mut frame = FrameBuilder::function(
+                module_id.clone(),
+                Identifier::new(func_name).unwrap_or_else(|_| Identifier::new("unknown").unwrap()),
+                ty_tags,
+            );
+            frame.node.args = decoded;
+            self.frames.push(frame);
+        }
         res
     }
 
@@ -939,5 +967,65 @@ pub fn decode_events_in_tree(node: &mut CallNode, decode: &impl Fn(&TypeTag, &[u
     }
     for child in &mut node.children {
         decode_events_in_tree(child, decode);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use move_vm_types::values::{Struct, Value};
+
+    #[test]
+    fn decodes_primitives_struct_and_bytes() {
+        let u = decode_value(&Value::u64(100));
+        assert_eq!(u.ty, "u64");
+        assert_eq!(u.value, Json::String("100".to_string()));
+
+        let addr = AccountAddress::from_hex_literal("0x42").unwrap();
+        let a = decode_value(&Value::address(addr));
+        assert_eq!(a.ty, "address");
+        assert_eq!(a.value, Json::String("0x42".to_string()));
+
+        // vector<u8> renders as a hex string, not an array of numbers.
+        let v = decode_value(&Value::vector_u8(vec![0xde, 0xad]));
+        assert_eq!(v.ty, "vector<u8>");
+        assert_eq!(v.value, Json::String("0xdead".to_string()));
+
+        // structs render by field index.
+        let s = decode_value(&Value::struct_(Struct::pack(vec![
+            Value::u64(0),
+            Value::address(addr),
+        ])));
+        assert_eq!(s.ty, "struct");
+        assert_eq!(s.value, serde_json::json!({"0": "0", "1": "0x42"}));
+    }
+
+    #[test]
+    fn build_abort_uses_active_chain_and_status() {
+        let module = ModuleId::new(
+            AccountAddress::from_hex_literal("0xcafe").unwrap(),
+            Identifier::new("counter").unwrap(),
+        );
+        let status = VMStatus::MoveAbort(AbortLocation::Module(module), 7);
+        // Active chain captured at abort: innermost first.
+        let stack = vec![
+            AbortStackEntry {
+                module: Some("0xcafe::counter".to_string()),
+                function: Some("check".to_string()),
+                offset: None,
+            },
+            AbortStackEntry {
+                module: Some("0xcafe::counter".to_string()),
+                function: Some("fail_deep".to_string()),
+                offset: None,
+            },
+        ];
+        let info = build_abort(&status, stack);
+        assert_eq!(info.code, 7);
+        assert_eq!(info.sub_status, None);
+        assert_eq!(info.module.as_deref(), Some("0xcafe::counter"));
+        assert_eq!(info.stack.len(), 2);
+        assert_eq!(info.stack[0].function.as_deref(), Some("check"));
+        assert_eq!(info.stack[1].function.as_deref(), Some("fail_deep"));
     }
 }

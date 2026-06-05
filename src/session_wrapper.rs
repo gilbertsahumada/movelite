@@ -159,21 +159,27 @@ impl SessionWrapper {
     }
 
     fn execute_transaction_traced_commit(&self, txn: SignedTransaction) -> Result<TraceResponse> {
-        let committed_record = {
-            let mut session = self.inner.lock().unwrap();
-            let (txn_output, response) = trace_on(&session, &txn)?;
-            // Commit the write set (gas + state) like `submit` does, regardless
-            // of success — failed txns still consume gas and bump the sequence.
-            session.commit_write_set(txn_output.write_set())?;
-            response
-        };
-
-        // Mirror submit_transaction's bookkeeping so GET /transactions/by_hash
-        // resolves the committed trace.
-        self.increment_ops();
-        let record = build_committed_record(&txn, &committed_record, self.get_ops_count());
-        self.store_transaction(committed_record.txn_hash.clone(), record);
-        Ok(committed_record)
+        // Hold the session lock across the commit AND the version/record
+        // bookkeeping so the stored `version`, the by_hash record, and the
+        // `x-aptos-ledger-version` headers can't be reordered by a concurrent
+        // committing request. (Lock order inner -> ops_count/tx_store is safe: no
+        // path takes them in the reverse order.) The instrumented run is held
+        // under the lock for its whole duration — this is intentionally not a
+        // fast path.
+        let mut session = self.inner.lock().unwrap();
+        let (output, response) = trace_on(&session, &txn)?;
+        if let Some(output) = output {
+            // Executed (kept): commit the write set (gas + state) like `submit`,
+            // regardless of success — aborted txns still consume gas and bump the
+            // sequence number. Then mirror submit's bookkeeping so
+            // GET /transactions/by_hash resolves the committed trace.
+            session.commit_write_set(output.write_set())?;
+            self.increment_ops();
+            let record = build_committed_record(&txn, &response, self.get_ops_count());
+            self.store_transaction(response.txn_hash.clone(), record);
+        }
+        // None = discarded by validation: never executed; nothing to commit or store.
+        Ok(response)
     }
 
     pub fn store_transaction(&self, hash: String, result: serde_json::Value) {
@@ -284,35 +290,48 @@ fn extract_entry(txn: &SignedTransaction) -> EntrySeed {
             user_arg_count: ef.args().len(),
         }
     }
-    let script = EntrySeed {
-        module: None,
-        function: None,
-        ty_args: vec![],
-        is_script: true,
-        // Script signer count isn't readily known here; don't strip.
-        user_arg_count: usize::MAX,
-    };
+    // For scripts, the user args are the `Script::args()` (signers are injected
+    // separately and not counted there), so stripping leading signers works the
+    // same way as for entry functions.
+    fn script_seed(user_arg_count: usize) -> EntrySeed {
+        EntrySeed {
+            module: None,
+            function: None,
+            ty_args: vec![],
+            is_script: true,
+            user_arg_count,
+        }
+    }
+    // Truly-unknown payloads (multisig/module-bundle/encrypted): don't strip.
+    let unknown = script_seed(usize::MAX);
     match txn.payload() {
         TransactionPayload::EntryFunction(ef) => from_ef(ef),
-        TransactionPayload::Script(_) => script,
+        TransactionPayload::Script(s) => script_seed(s.args().len()),
         TransactionPayload::Payload(TransactionPayloadInner::V1 { executable, .. }) => {
             match executable {
                 TransactionExecutable::EntryFunction(ef) => from_ef(ef),
-                _ => script,
+                TransactionExecutable::Script(s) => script_seed(s.args().len()),
+                _ => unknown,
             }
         },
-        _ => script,
+        _ => unknown,
     }
 }
 
 /// Replicates `Session::execute_transaction`'s VM wiring (session.rs:271-293)
 /// but routes through `execute_user_transaction_with_modified_gas_meter` with a
-/// `TracerMeter`, preserving production gas behavior. Returns the materialized
-/// output (so the caller can commit its write set) and the built trace response.
+/// `TracerMeter`, preserving production gas behavior.
+///
+/// Returns `(Some(output), response)` for an executed (kept) transaction so the
+/// caller can commit the write set, or `(None, response)` for a transaction
+/// discarded by validation/prologue (bad sequence number, expired, insufficient
+/// gas for the intrinsic, …) — which never executed, so there is nothing to
+/// commit. The discard still yields a structured response (entry frame only,
+/// `success:false`) rather than an error, mirroring `submit_transaction`.
 fn trace_on(
     session: &Session,
     txn: &SignedTransaction,
-) -> Result<(TransactionOutput, TraceResponse)> {
+) -> Result<(Option<TransactionOutput>, TraceResponse)> {
     let tx_hash = format!("0x{}", hex::encode(txn.committed_hash().to_vec()));
     let seed = extract_entry(txn);
 
@@ -330,28 +349,41 @@ fn trace_on(
         None,
     );
 
-    let (vm_status, vm_output, meter) = vm
-        .execute_user_transaction_with_modified_gas_meter(
-            &resolver,
-            &code_storage,
-            txn,
-            &log_context,
-            |prod| {
-                if seed.is_script {
-                    TracerMeter::new_script(prod, seed.user_arg_count)
-                } else {
-                    TracerMeter::new_function(
-                        prod,
-                        seed.module.clone().expect("entry function has a module"),
-                        seed.function.clone().expect("entry function has a name"),
-                        seed.ty_args.clone(),
-                        seed.user_arg_count,
-                    )
-                }
-            },
-            &aux,
-        )
-        .map_err(|status| anyhow::anyhow!("trace execution error: {:?}", status))?;
+    let exec = vm.execute_user_transaction_with_modified_gas_meter(
+        &resolver,
+        &code_storage,
+        txn,
+        &log_context,
+        |prod| {
+            if seed.is_script {
+                TracerMeter::new_script(prod, seed.user_arg_count)
+            } else {
+                TracerMeter::new_function(
+                    prod,
+                    seed.module.clone().expect("entry function has a module"),
+                    seed.function.clone().expect("entry function has a name"),
+                    seed.ty_args.clone(),
+                    seed.user_arg_count,
+                )
+            }
+        },
+        &aux,
+    );
+
+    let (vm_status, vm_output, meter) = match exec {
+        Ok(triple) => triple,
+        Err(status) => {
+            // Discarded before execution — return a structured response (entry
+            // frame only), not an error.
+            let root = crate::trace::entry_stub(
+                seed.module.clone(),
+                seed.function.clone(),
+                seed.ty_args.clone(),
+            );
+            let response = build_response(tx_hash, &status, 0, root, vec![]);
+            return Ok((None, response));
+        },
+    };
 
     let txn_output = vm_output
         .try_materialize_into_transaction_output(&resolver)
@@ -373,7 +405,7 @@ fn trace_on(
     crate::trace::decode_events_in_tree(&mut root, &decode);
 
     let response = build_response(tx_hash, &vm_status, gas_used, root, abort_stack);
-    Ok((txn_output, response))
+    Ok((Some(txn_output), response))
 }
 
 /// Builds the committed-transaction record stored for GET /transactions/by_hash,
