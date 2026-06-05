@@ -449,14 +449,26 @@ async fn simulate_transaction(
     })]))
 }
 
+#[derive(Deserialize)]
+struct TraceParams {
+    /// When true, also commit the transaction (single-pass trace + submit).
+    /// Defaults to false (simulate-like, read-only).
+    commit: Option<bool>,
+}
+
 /// Opt-in Foundry-style execution trace. Accepts a BCS-signed transaction just
-/// like submit/simulate, executes it through the instrumented VM path WITHOUT
-/// committing, and returns the call tree. The normal submit/simulate paths do
-/// not pay this overhead.
+/// like submit/simulate and executes it through the instrumented VM path,
+/// returning the call tree. With `?commit=true` it also commits the result in a
+/// single pass (and is auth-gated like submit). The normal submit/simulate paths
+/// do not pay the tracing overhead.
 async fn trace_transaction(
     State(session): State<AppState>,
+    Query(params): Query<TraceParams>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let commit = params.commit.unwrap_or(false);
+
     let txn: aptos_types::transaction::SignedTransaction = bcs::from_bytes(&body).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -464,9 +476,14 @@ async fn trace_transaction(
         )
     })?;
 
+    // Committing mutates state, so gate it like submit_transaction.
+    if commit && session.options.strict_local_auth {
+        require_auth(&headers, &session)?;
+    }
+
     let trace = session
         .session
-        .execute_transaction_traced(txn)
+        .execute_transaction_traced(txn, commit)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     serde_json::to_value(trace)

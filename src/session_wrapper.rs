@@ -111,10 +111,27 @@ impl SessionWrapper {
         }
     }
 
-    /// Executes a transaction through the instrumented (tracing) VM path on a
-    /// throwaway clone of the session — like `simulate_transaction`, it never
-    /// commits. Returns the Foundry-style call trace.
-    pub fn execute_transaction_traced(&self, txn: SignedTransaction) -> Result<TraceResponse> {
+    /// Executes a transaction through the instrumented (tracing) VM path and
+    /// returns the Foundry-style call trace.
+    ///
+    /// - `commit == false` (default): runs on a throwaway clone of the session,
+    ///   like `simulate_transaction` — never mutates state.
+    /// - `commit == true`: runs on the live session and commits the write set in
+    ///   a single pass (same state effect as `submit`), so callers get the trace
+    ///   tree AND the committed result without re-executing.
+    pub fn execute_transaction_traced(
+        &self,
+        txn: SignedTransaction,
+        commit: bool,
+    ) -> Result<TraceResponse> {
+        if commit {
+            self.execute_transaction_traced_commit(txn)
+        } else {
+            self.execute_transaction_traced_dry(txn)
+        }
+    }
+
+    fn execute_transaction_traced_dry(&self, txn: SignedTransaction) -> Result<TraceResponse> {
         let temp_path = make_temp_session_path("trace")?;
         std::fs::create_dir_all(&temp_path)?;
 
@@ -125,7 +142,8 @@ impl SessionWrapper {
                 copy_session_file(&self.session_path, &temp_path, "delta.json")?;
             }
             let session = Session::load(&temp_path)?;
-            run_traced(&session, txn)
+            let (_output, response) = trace_on(&session, &txn)?;
+            Ok(response)
         })();
 
         let cleanup_result = std::fs::remove_dir_all(&temp_path);
@@ -138,6 +156,24 @@ impl SessionWrapper {
             )),
             (Err(e), _) => Err(e),
         }
+    }
+
+    fn execute_transaction_traced_commit(&self, txn: SignedTransaction) -> Result<TraceResponse> {
+        let committed_record = {
+            let mut session = self.inner.lock().unwrap();
+            let (txn_output, response) = trace_on(&session, &txn)?;
+            // Commit the write set (gas + state) like `submit` does, regardless
+            // of success — failed txns still consume gas and bump the sequence.
+            session.commit_write_set(txn_output.write_set())?;
+            response
+        };
+
+        // Mirror submit_transaction's bookkeeping so GET /transactions/by_hash
+        // resolves the committed trace.
+        self.increment_ops();
+        let record = build_committed_record(&txn, &committed_record, self.get_ops_count());
+        self.store_transaction(committed_record.txn_hash.clone(), record);
+        Ok(committed_record)
     }
 
     pub fn store_transaction(&self, hash: String, result: serde_json::Value) {
@@ -271,10 +307,14 @@ fn extract_entry(txn: &SignedTransaction) -> EntrySeed {
 
 /// Replicates `Session::execute_transaction`'s VM wiring (session.rs:271-293)
 /// but routes through `execute_user_transaction_with_modified_gas_meter` with a
-/// `TracerMeter`, preserving production gas behavior.
-fn run_traced(session: &Session, txn: SignedTransaction) -> Result<TraceResponse> {
+/// `TracerMeter`, preserving production gas behavior. Returns the materialized
+/// output (so the caller can commit its write set) and the built trace response.
+fn trace_on(
+    session: &Session,
+    txn: &SignedTransaction,
+) -> Result<(TransactionOutput, TraceResponse)> {
     let tx_hash = format!("0x{}", hex::encode(txn.committed_hash().to_vec()));
-    let seed = extract_entry(&txn);
+    let seed = extract_entry(txn);
 
     let state_store = session.state_store();
     let env = AptosEnvironment::new(state_store);
@@ -294,7 +334,7 @@ fn run_traced(session: &Session, txn: SignedTransaction) -> Result<TraceResponse
         .execute_user_transaction_with_modified_gas_meter(
             &resolver,
             &code_storage,
-            &txn,
+            txn,
             &log_context,
             |prod| {
                 if seed.is_script {
@@ -332,7 +372,31 @@ fn run_traced(session: &Session, txn: SignedTransaction) -> Result<TraceResponse
     };
     crate::trace::decode_events_in_tree(&mut root, &decode);
 
-    Ok(build_response(tx_hash, &vm_status, gas_used, root, abort_stack))
+    let response = build_response(tx_hash, &vm_status, gas_used, root, abort_stack);
+    Ok((txn_output, response))
+}
+
+/// Builds the committed-transaction record stored for GET /transactions/by_hash,
+/// matching the shape `submit_transaction` produces.
+fn build_committed_record(
+    txn: &SignedTransaction,
+    response: &TraceResponse,
+    version: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "user_transaction",
+        "hash": response.txn_hash,
+        "success": response.success,
+        "vm_status": response.vm_status,
+        "version": version.to_string(),
+        "sender": format!("0x{}", hex::encode(txn.sender().to_vec())),
+        "sequence_number": txn.sequence_number().to_string(),
+        "max_gas_amount": txn.max_gas_amount().to_string(),
+        "gas_unit_price": txn.gas_unit_price().to_string(),
+        "expiration_timestamp_secs": txn.expiration_timestamp_secs().to_string(),
+        "gas_used": response.gas_used.to_string(),
+        "timestamp": "0"
+    })
 }
 
 fn copy_session_file(from_dir: &PathBuf, to_dir: &PathBuf, file_name: &str) -> Result<()> {
