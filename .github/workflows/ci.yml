@@ -1,0 +1,66 @@
+name: CI
+
+# Validates every PR (and main after merge): builds movelite the same way
+# releases do (build.sh, inside the aptos-core workspace with the trace patches
+# applied) and runs the crate's unit tests. There is no other build/test gate,
+# so this is what catches compile breakage and failing tests before merge.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref (e.g. rapid PR pushes).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & test (linux-x64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libssl-dev libudev-dev clang
+
+      - name: Cache cargo registry + aptos-core target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .aptos-core/target
+          # Rebuild the cache when deps, the build script, or the patches change.
+          key: ci-cargo-${{ hashFiles('Cargo.toml', 'build.sh', 'patches/aptos-core/*.patch') }}
+          restore-keys: |
+            ci-cargo-
+
+      - name: Build movelite
+        # Clones aptos-core (or reuses the cached target), applies the trace
+        # patches, and builds the release binary with --features trace_patches.
+        run: bash build.sh
+
+      - name: Smoke test
+        run: ./target/movelite --help
+
+      - name: Unit tests
+        # build.sh's EXIT trap removes the workspace member, so re-add it. Using
+        # --release reuses the release artifacts build.sh just produced (the
+        # aptos-core dep tree), so only movelite's test harness recompiles.
+        run: |
+          grep -q '"movelite"' .aptos-core/Cargo.toml || \
+            sed -i 's/"vm-validator",/"vm-validator",\n    "movelite",/' .aptos-core/Cargo.toml
+          rm -rf .aptos-core/movelite && mkdir -p .aptos-core/movelite
+          sed 's|\.\./\.aptos-core/|\.\./|g' Cargo.toml > .aptos-core/movelite/Cargo.toml
+          ln -sf "$PWD/src" .aptos-core/movelite/src
+          cd .aptos-core && cargo test -p movelite --release --features trace_patches
