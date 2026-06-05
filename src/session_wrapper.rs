@@ -1,3 +1,4 @@
+use crate::trace::{build_response, TraceResponse, TracerMeter};
 use anyhow::Result;
 use aptos_transaction_simulation::SimulationStateStore;
 use aptos_transaction_simulation_session::Session;
@@ -5,8 +6,15 @@ use aptos_types::account_address::AccountAddress;
 use aptos_types::chain_id::ChainId;
 use aptos_types::state_store::state_key::StateKey;
 use aptos_types::state_store::TStateView;
-use aptos_types::transaction::{SignedTransaction, TransactionOutput};
+use aptos_types::transaction::{
+    AuxiliaryInfo, EntryFunction, PersistedAuxiliaryInfo, SignedTransaction, TransactionExecutable,
+    TransactionOutput, TransactionPayload, TransactionPayloadInner,
+};
 use aptos_types::vm_status::VMStatus;
+use aptos_vm::{data_cache::AsMoveResolver, AptosVM};
+use aptos_vm_environment::environment::AptosEnvironment;
+use aptos_vm_logging::log_schema::AdapterLogSchema;
+use aptos_vm_types::module_and_script_storage::AsAptosCodeStorage;
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::{ModuleId, StructTag, TypeTag};
 use std::collections::HashMap;
@@ -103,6 +111,35 @@ impl SessionWrapper {
         }
     }
 
+    /// Executes a transaction through the instrumented (tracing) VM path on a
+    /// throwaway clone of the session — like `simulate_transaction`, it never
+    /// commits. Returns the Foundry-style call trace.
+    pub fn execute_transaction_traced(&self, txn: SignedTransaction) -> Result<TraceResponse> {
+        let temp_path = make_temp_session_path("trace")?;
+        std::fs::create_dir_all(&temp_path)?;
+
+        let result = (|| {
+            {
+                let _session_guard = self.inner.lock().unwrap();
+                copy_session_file(&self.session_path, &temp_path, "config.json")?;
+                copy_session_file(&self.session_path, &temp_path, "delta.json")?;
+            }
+            let session = Session::load(&temp_path)?;
+            run_traced(&session, txn)
+        })();
+
+        let cleanup_result = std::fs::remove_dir_all(&temp_path);
+        match (result, cleanup_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(_), Err(e)) => Err(anyhow::anyhow!(
+                "trace completed but failed to remove temp session {}: {}",
+                temp_path.display(),
+                e
+            )),
+            (Err(e), _) => Err(e),
+        }
+    }
+
     pub fn store_transaction(&self, hash: String, result: serde_json::Value) {
         let mut store = self.tx_store.lock().unwrap();
         if store.len() >= 10_000 {
@@ -188,6 +225,114 @@ pub fn create_session(options: SessionOptions) -> Result<SessionWrapper> {
     let chain_id = session.state_store().get_chain_id()?.id() as u64;
     eprintln!("Session ready at {}.", session_path.display());
     Ok(SessionWrapper::new(session, session_path, chain_id))
+}
+
+/// Entry-frame seed extracted from the transaction payload (the entry function
+/// produces no `charge_call`, so the tracer must be pre-seeded with it).
+struct EntrySeed {
+    module: Option<ModuleId>,
+    function: Option<Identifier>,
+    ty_args: Vec<TypeTag>,
+    is_script: bool,
+    /// User-provided arg count (excludes VM-injected leading `&signer`s).
+    user_arg_count: usize,
+}
+
+fn extract_entry(txn: &SignedTransaction) -> EntrySeed {
+    fn from_ef(ef: &EntryFunction) -> EntrySeed {
+        EntrySeed {
+            module: Some(ef.module().clone()),
+            function: Some(ef.function().to_owned()),
+            ty_args: ef.ty_args().to_vec(),
+            is_script: false,
+            user_arg_count: ef.args().len(),
+        }
+    }
+    let script = EntrySeed {
+        module: None,
+        function: None,
+        ty_args: vec![],
+        is_script: true,
+        // Script signer count isn't readily known here; don't strip.
+        user_arg_count: usize::MAX,
+    };
+    match txn.payload() {
+        TransactionPayload::EntryFunction(ef) => from_ef(ef),
+        TransactionPayload::Script(_) => script,
+        TransactionPayload::Payload(TransactionPayloadInner::V1 { executable, .. }) => {
+            match executable {
+                TransactionExecutable::EntryFunction(ef) => from_ef(ef),
+                _ => script,
+            }
+        },
+        _ => script,
+    }
+}
+
+/// Replicates `Session::execute_transaction`'s VM wiring (session.rs:271-293)
+/// but routes through `execute_user_transaction_with_modified_gas_meter` with a
+/// `TracerMeter`, preserving production gas behavior.
+fn run_traced(session: &Session, txn: SignedTransaction) -> Result<TraceResponse> {
+    let tx_hash = format!("0x{}", hex::encode(txn.committed_hash().to_vec()));
+    let seed = extract_entry(&txn);
+
+    let state_store = session.state_store();
+    let env = AptosEnvironment::new(state_store);
+    let vm = AptosVM::new(&env, state_store);
+    let log_context = AdapterLogSchema::new(state_store.id(), 0);
+    let resolver = state_store.as_move_resolver();
+    let code_storage = state_store.as_aptos_code_storage(&env);
+
+    let aux = AuxiliaryInfo::new(
+        PersistedAuxiliaryInfo::V1 {
+            transaction_index: 0,
+        },
+        None,
+    );
+
+    let (vm_status, vm_output, meter) = vm
+        .execute_user_transaction_with_modified_gas_meter(
+            &resolver,
+            &code_storage,
+            &txn,
+            &log_context,
+            |prod| {
+                if seed.is_script {
+                    TracerMeter::new_script(prod, seed.user_arg_count)
+                } else {
+                    TracerMeter::new_function(
+                        prod,
+                        seed.module.clone().expect("entry function has a module"),
+                        seed.function.clone().expect("entry function has a name"),
+                        seed.ty_args.clone(),
+                        seed.user_arg_count,
+                    )
+                }
+            },
+            &aux,
+        )
+        .map_err(|status| anyhow::anyhow!("trace execution error: {:?}", status))?;
+
+    let txn_output = vm_output
+        .try_materialize_into_transaction_output(&resolver)
+        .map_err(|status| anyhow::anyhow!("failed to materialize trace output: {:?}", status))?;
+    let gas_used = txn_output.gas_used();
+
+    let (mut root, abort_stack) = meter.finish();
+
+    // Decode per-frame event payloads (TypeTag + BCS) to named JSON, using the
+    // same annotator the REST API uses for resources/events. Falls back to hex.
+    let annotator = aptos_resource_viewer::AptosValueAnnotator::new(state_store);
+    let decode = |tag: &TypeTag, blob: &[u8]| -> serde_json::Value {
+        let decoded: anyhow::Result<serde_json::Value> = annotator
+            .view_value(tag, blob)
+            .and_then(|av| Ok(aptos_api_types::MoveValue::try_from(av)?))
+            .and_then(|mv| mv.json());
+        decoded.unwrap_or_else(|_| serde_json::Value::String(format!("0x{}", hex::encode(blob))))
+    };
+    crate::trace::decode_events_in_tree(&mut root, &decode);
+
+    Ok(build_response(tx_hash, &vm_status, gas_used, root, abort_stack))
 }
 
 fn copy_session_file(from_dir: &PathBuf, to_dir: &PathBuf, file_name: &str) -> Result<()> {

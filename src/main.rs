@@ -1,5 +1,6 @@
 mod server;
 mod session_wrapper;
+mod trace;
 
 use anyhow::Result;
 use aptos_crypto::HashValue;
