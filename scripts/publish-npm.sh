@@ -14,6 +14,13 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+
   exit 1
 fi
 
+# Prerelease versions (any `-suffix`, e.g. 0.2.0-rc.1) publish under the `next`
+# dist-tag so they never become `latest`. Threaded through every package below.
+TAG_ARGS=()
+if [[ "$VERSION" == *-* ]]; then
+  TAG_ARGS=(--tag next)
+fi
+
 for platform in "${PLATFORMS[@]}"; do
   binary="artifacts/movelite-${platform}/movelite"
   if [ ! -f "$binary" ]; then
@@ -21,7 +28,7 @@ for platform in "${PLATFORMS[@]}"; do
     exit 1
   fi
   bash scripts/build-npm-package.sh "$platform" "$VERSION" "$binary"
-  (cd "build/movelite-${platform}" && npm publish --access public --provenance)
+  (cd "build/movelite-${platform}" && npm publish --access public --provenance "${TAG_ARGS[@]}")
 done
 
 node - "$VERSION" <<'NODE'
@@ -36,6 +43,6 @@ for (const k of Object.keys(pkg.optionalDependencies)) {
 fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
 NODE
 
-(cd npm/movelite && npm publish --access public --provenance)
+(cd npm/movelite && npm publish --access public --provenance "${TAG_ARGS[@]}")
 
 echo "Released movelite@${VERSION}"
