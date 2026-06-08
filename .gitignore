@@ -9,3 +9,8 @@ node_modules/
 # Local-only internal docs, never published
 AUDIT_FINDINGS.md
 POSTMORTEM-*.md
+
+# Kept local, not published to the public repo: AI guidelines + the TS
+# verification harness (not wired into CI; CI runs `cargo test` in src/).
+CLAUDE.md
+test/
