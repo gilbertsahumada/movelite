@@ -1,9 +1,0 @@
-[package]
-name = "counter"
-version = "0.0.1"
-
-[addresses]
-counter = "_"
-
-[dependencies.AptosFramework]
-local = "../../.aptos-core/aptos-move/framework/aptos-framework"
