@@ -53,6 +53,18 @@ enum Commands {
         /// Require the movelite auth token for Aptos-compatible mutating endpoints too
         #[arg(long)]
         strict_local_auth: bool,
+
+        /// Allow browser requests from non-loopback Origin headers
+        #[arg(long)]
+        allow_external_browser_origins: bool,
+
+        /// Maximum accepted request body size in bytes
+        #[arg(long, default_value_t = 67_108_864)]
+        max_request_bytes: usize,
+
+        /// Maximum concurrent VM-heavy requests; 0 disables the limit
+        #[arg(long, default_value_t = 32)]
+        vm_max_concurrency: usize,
     },
     /// Show version
     Version,
@@ -73,6 +85,9 @@ async fn main() -> Result<()> {
             auth_token,
             no_auth,
             strict_local_auth,
+            allow_external_browser_origins,
+            max_request_bytes,
+            vm_max_concurrency,
         } => {
             eprintln!("movelite v{}", env!("CARGO_PKG_VERSION"));
             eprintln!();
@@ -107,6 +122,9 @@ async fn main() -> Result<()> {
                 server::ServerOptions {
                     auth_token: token,
                     strict_local_auth,
+                    allow_external_browser_origins,
+                    max_request_bytes,
+                    vm_max_concurrency,
                 },
             )
             .await

@@ -65,6 +65,29 @@ The build script clones `aptos-core` (pinned to the last Apache 2.0 commit) and 
 ./target/movelite start --port 8090 --fork-url https://testnet.movementnetwork.xyz/v1
 ```
 
+### Local security controls
+
+movelite binds to `127.0.0.1` and is intended for local development. To reduce
+browser-to-localhost abuse, POST requests with a non-loopback `Origin` header are
+blocked by default. Requests without `Origin` headers, such as SDKs, CLIs and
+normal Node tooling, continue to work.
+
+Useful hardening flags:
+
+```bash
+# Require x-movelite-token on Aptos-compatible mutating endpoints too.
+./target/movelite start --strict-local-auth
+
+# Restore legacy behavior for browser UIs hosted on non-loopback origins.
+./target/movelite start --allow-external-browser-origins
+
+# Tune request body and concurrent VM request limits.
+./target/movelite start --max-request-bytes 67108864 --vm-max-concurrency 32
+```
+
+`--vm-max-concurrency 0` disables the concurrency limit. `/mint` remains token
+protected by default unless `--no-auth` is explicitly used.
+
 ### Test
 
 ```bash
