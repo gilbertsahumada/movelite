@@ -21,6 +21,12 @@ The installer pulls a pre-compiled binary for your platform via optional depende
 movelite start --port 8090
 ```
 
+movelite listens on `127.0.0.1`. Browser requests from non-loopback origins are
+blocked by default; SDKs and CLIs without an `Origin` header keep working. Use
+`--strict-local-auth` to require `x-movelite-token` on Aptos-compatible mutating
+endpoints too, or `--allow-external-browser-origins` if you intentionally run a
+remote-hosted UI against your local server.
+
 See [github.com/gilbertsahumada/movelite](https://github.com/gilbertsahumada/movelite) for endpoints and integration with [movehat](https://www.npmjs.com/package/movehat).
 
 ## License

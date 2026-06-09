@@ -2,7 +2,7 @@ use crate::session_wrapper::SessionWrapper;
 use anyhow::Result;
 use aptos_types::account_address::AccountAddress;
 use axum::{
-    extract::{Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{Json, Response},
@@ -13,21 +13,36 @@ use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::{ModuleId, StructTag, TypeTag};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 type AppState = Arc<ServerState>;
 
 pub struct ServerOptions {
     pub auth_token: Option<String>,
     pub strict_local_auth: bool,
+    pub allow_external_browser_origins: bool,
+    pub max_request_bytes: usize,
+    pub vm_max_concurrency: usize,
 }
 
 struct ServerState {
     session: SessionWrapper,
     options: ServerOptions,
+    vm_semaphore: Option<Arc<Semaphore>>,
 }
 
 pub async fn run(session: SessionWrapper, port: u16, options: ServerOptions) -> Result<()> {
-    let state: AppState = Arc::new(ServerState { session, options });
+    let vm_semaphore = if options.vm_max_concurrency == 0 {
+        None
+    } else {
+        Some(Arc::new(Semaphore::new(options.vm_max_concurrency)))
+    };
+    let max_request_bytes = options.max_request_bytes;
+    let state: AppState = Arc::new(ServerState {
+        session,
+        options,
+        vm_semaphore,
+    });
 
     let v1 = Router::new()
         .route("/", get(ledger_info))
@@ -57,6 +72,7 @@ pub async fn run(session: SessionWrapper, port: u16, options: ServerOptions) -> 
             state.clone(),
             inject_ledger_headers,
         ))
+        .layer(DefaultBodyLimit::max(max_request_bytes))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
@@ -139,6 +155,58 @@ async fn estimate_gas_price() -> Json<serde_json::Value> {
         "deprioritized_gas_estimate": 100,
         "prioritized_gas_estimate": 150
     }))
+}
+
+fn reject_nonlocal_browser_origin(
+    headers: &HeaderMap,
+    state: &ServerState,
+) -> Result<(), (StatusCode, String)> {
+    if state.options.allow_external_browser_origins {
+        return Ok(());
+    }
+
+    let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
+        return Ok(());
+    };
+
+    let Ok(parsed) = url::Url::parse(origin) else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "external browser origins are disabled".to_string(),
+        ));
+    };
+
+    if matches!(
+        parsed.host_str(),
+        Some("localhost") | Some("127.0.0.1") | Some("::1")
+    ) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            "external browser origins are disabled".to_string(),
+        ))
+    }
+}
+
+async fn acquire_vm_permit(
+    state: &ServerState,
+) -> Result<Option<OwnedSemaphorePermit>, (StatusCode, String)> {
+    let Some(semaphore) = &state.vm_semaphore else {
+        return Ok(None);
+    };
+
+    semaphore
+        .clone()
+        .acquire_owned()
+        .await
+        .map(Some)
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "VM request limit is unavailable".to_string(),
+            )
+        })
 }
 
 #[derive(Serialize)]
@@ -295,6 +363,9 @@ async fn view_function(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    reject_nonlocal_browser_origin(&headers, &session)?;
+    let _permit = acquire_vm_permit(&session).await?;
+
     let content_type = headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
@@ -344,6 +415,9 @@ async fn submit_transaction(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    reject_nonlocal_browser_origin(&headers, &session)?;
+    let _permit = acquire_vm_permit(&session).await?;
+
     if session.options.strict_local_auth {
         require_auth(&headers, &session)?;
     }
@@ -423,8 +497,12 @@ async fn get_transaction_by_hash(
 
 async fn simulate_transaction(
     State(session): State<AppState>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    reject_nonlocal_browser_origin(&headers, &session)?;
+    let _permit = acquire_vm_permit(&session).await?;
+
     let txn: aptos_types::transaction::SignedTransaction = bcs::from_bytes(&body).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -467,6 +545,9 @@ async fn trace_transaction(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    reject_nonlocal_browser_origin(&headers, &session)?;
+    let _permit = acquire_vm_permit(&session).await?;
+
     let commit = params.commit.unwrap_or(false);
 
     let txn: aptos_types::transaction::SignedTransaction = bcs::from_bytes(&body).map_err(|e| {
@@ -502,6 +583,9 @@ async fn mint(
     headers: HeaderMap,
     Query(params): Query<MintQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    reject_nonlocal_browser_origin(&headers, &session)?;
+    let _permit = acquire_vm_permit(&session).await?;
+
     require_auth(&headers, &session)?;
 
     let addr = parse_address(&params.address)?;
@@ -604,7 +688,9 @@ fn require_auth(headers: &HeaderMap, state: &ServerState) -> Result<(), (StatusC
         return Ok(());
     };
 
-    let provided = headers.get("x-movelite-token").and_then(|v| v.to_str().ok());
+    let provided = headers
+        .get("x-movelite-token")
+        .and_then(|v| v.to_str().ok());
 
     if provided == Some(expected.as_str()) {
         Ok(())
