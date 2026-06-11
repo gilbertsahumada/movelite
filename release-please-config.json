@@ -5,7 +5,7 @@
       "release-type": "node",
       "package-name": "movelite",
       "include-component-in-tag": false,
-      "extra-files": ["Cargo.toml"]
+      "extra-files": ["/Cargo.toml"]
     }
   }
 }
