@@ -1,0 +1,48 @@
+name: Release Please
+
+# Professional release automation. On every push to main, release-please opens
+# (or updates) a single "Release PR" that bumps the version + writes CHANGELOG.md
+# from the Conventional Commits since the last release. Merging that PR creates
+# the vX.Y.Z tag + GitHub Release and, in the same run, calls release.yml to build
+# all platforms and publish to npm.
+#
+# Why call release.yml via workflow_call instead of relying on its
+# `release: published` trigger: a Release created with the default GITHUB_TOKEN
+# does NOT re-trigger other workflows (GitHub blocks recursive triggers), so the
+# event would never fire. Calling it directly sidesteps that — no PAT needed.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Maintain release PR
+    runs-on: ubuntu-latest
+    outputs:
+      # Manifest mode with a package at npm/movelite -> outputs are path-prefixed.
+      release_created: ${{ steps.rp.outputs['npm/movelite--release_created'] }}
+      version: ${{ steps.rp.outputs['npm/movelite--version'] }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # config-file / manifest-file default to release-please-config.json
+          # and .release-please-manifest.json at the repo root.
+
+  publish:
+    name: Publish release
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/release.yml
+    with:
+      version: ${{ needs.release-please.outputs.version }}
+    secrets: inherit

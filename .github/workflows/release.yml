@@ -8,6 +8,14 @@ on:
       version:
         description: "Version to release (no v prefix, e.g. 0.1.0)"
         required: true
+  # Called by release-please.yml after it creates a Release. Kept alongside the
+  # release/dispatch triggers so manual UI releases and manual reruns still work.
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to release (no v prefix, e.g. 0.1.0)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -103,13 +111,16 @@ jobs:
         # strict semver before any downstream step (publish-npm.sh) consumes it.
         env:
           RAW_RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RAW_DISPATCH_VERSION: ${{ github.event.inputs.version }}
+          # `inputs.version` is populated for BOTH workflow_dispatch and
+          # workflow_call (release-please), so one branch covers both. The
+          # `release:` event leaves it empty and uses the tag instead.
+          INPUT_VERSION: ${{ inputs.version }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ "$EVENT_NAME" = "release" ]; then
             VERSION="${RAW_RELEASE_TAG#v}"
           else
-            VERSION="$RAW_DISPATCH_VERSION"
+            VERSION="$INPUT_VERSION"
           fi
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Resolved version '$VERSION' is not valid semver." >&2
