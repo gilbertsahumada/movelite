@@ -114,7 +114,7 @@ movelite implements a subset of the [Aptos REST API](https://aptos.dev/en/build/
 | `/v1/transactions/simulate` | POST | Simulate transaction without commit | Done |
 | `/v1/transactions/trace` | POST | Foundry-style execution trace (`?commit=true` to also commit) | Done |
 | `/v1/transactions/by_hash/:hash` | GET | Committed transaction by hash | Done |
-| `/v1/transactions/wait_by_hash/:hash` | GET | Same as `by_hash` (commits are synchronous, returns immediately) | Done |
+| `/v1/transactions/wait_by_hash/:hash` | GET | Same as `by_hash` (no polling needed; commits are synchronous) | Done |
 | `/mint` | POST | Fund account (faucet, requires `x-movelite-token` by default) | Done |
 
 Transaction endpoints accept BCS bodies only (`Content-Type: application/x.aptos.signed_transaction+bcs`); JSON transaction submission returns `415`. Responses are JSON. Requests time out after 30s and bodies are capped at 2MB.
@@ -128,6 +128,8 @@ curl -X POST "http://localhost:8090/v1/transactions/trace" \
   -H "Content-Type: application/x.aptos.signed_transaction+bcs" \
   --data-binary @signed-txn.bcs
 ```
+
+When `?commit=true` is used with `--strict-local-auth` enabled, the request also requires the `x-movelite-token` header (see [Options](#options) above), since committing mutates state.
 
 ## Integration with movehat
 
