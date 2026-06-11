@@ -33,6 +33,11 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
+# Non-poisoning lock for the VM session (a panic must not brick the server).
+parking_lot = { workspace = true }
+# Not a workspace dep in aptos-core; 0.4.13 is already in Cargo.lock via axum,
+# so pinning it adds no lock churn (same precedent as `urlencoding`).
+tower = { version = "0.4.13", features = ["timeout", "limit", "util"] }
 clap = { workspace = true, features = ["derive"] }
 url = { workspace = true }
 urlencoding = "2"

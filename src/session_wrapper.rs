@@ -4,6 +4,7 @@ use aptos_transaction_simulation::SimulationStateStore;
 use aptos_transaction_simulation_session::Session;
 use aptos_types::account_address::AccountAddress;
 use aptos_types::chain_id::ChainId;
+use aptos_types::on_chain_config::{FeatureFlag, Features};
 use aptos_types::state_store::state_key::StateKey;
 use aptos_types::state_store::TStateView;
 use aptos_types::transaction::{
@@ -17,10 +18,59 @@ use aptos_vm_logging::log_schema::AdapterLogSchema;
 use aptos_vm_types::module_and_script_storage::AsAptosCodeStorage;
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::{ModuleId, StructTag, TypeTag};
-use std::collections::HashMap;
+// parking_lot instead of std::sync::Mutex: a panic while holding the lock
+// must not poison it — with std, every later request would panic on
+// `lock().unwrap()`, turning one bad transaction into a full-server DoS
+// (audit #11). Panic visibility is preserved by the server's spawn_blocking
+// wrapper (JoinError -> 500 on the offending request only).
+use parking_lot::Mutex;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Max committed-transaction records kept for GET /transactions/by_hash.
+const TX_STORE_CAP: usize = 10_000;
+
+/// Bounded transaction record store with deterministic FIFO eviction.
+///
+/// `HashMap::keys().next()` (the previous eviction victim) is arbitrary, so a
+/// recent transaction could be evicted before an old one. An insertion-order
+/// queue alongside the map makes the oldest entry the victim.
+struct TxStore {
+    map: HashMap<String, serde_json::Value>,
+    order: VecDeque<String>,
+    cap: usize,
+}
+
+impl TxStore {
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            cap,
+        }
+    }
+
+    fn insert(&mut self, hash: String, value: serde_json::Value) {
+        // Re-inserting an existing hash (e.g. trace-commit storing the same
+        // hash submit would) overwrites in place without duplicating the queue
+        // entry, which would otherwise corrupt eviction order.
+        if self.map.insert(hash.clone(), value).is_none() {
+            self.order.push_back(hash);
+        }
+        while self.map.len() > self.cap {
+            if let Some(oldest) = self.order.pop_front() {
+                self.map.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn get(&self, hash: &str) -> Option<&serde_json::Value> {
+        self.map.get(hash)
+    }
+}
 
 pub struct SessionOptions {
     pub fork_url: Option<String>,
@@ -33,7 +83,7 @@ pub struct SessionOptions {
 pub struct SessionWrapper {
     inner: Mutex<Session>,
     ops_count: Mutex<u64>,
-    tx_store: Mutex<HashMap<String, serde_json::Value>>,
+    tx_store: Mutex<TxStore>,
     session_path: PathBuf,
     chain_id: u64,
 }
@@ -43,14 +93,14 @@ impl SessionWrapper {
         Self {
             inner: Mutex::new(session),
             ops_count: Mutex::new(0),
-            tx_store: Mutex::new(HashMap::new()),
+            tx_store: Mutex::new(TxStore::with_capacity(TX_STORE_CAP)),
             session_path,
             chain_id,
         }
     }
 
     pub fn fund_account(&self, address: AccountAddress, amount: u64) -> Result<()> {
-        let mut session = self.inner.lock().unwrap();
+        let mut session = self.inner.lock();
         session.fund_account(address, amount)
     }
 
@@ -61,7 +111,7 @@ impl SessionWrapper {
         ty_args: Vec<TypeTag>,
         args: Vec<Vec<u8>>,
     ) -> Result<Vec<serde_json::Value>> {
-        let mut session = self.inner.lock().unwrap();
+        let mut session = self.inner.lock();
         session.execute_view_function(module_id, function_name, ty_args, args)
     }
 
@@ -70,16 +120,40 @@ impl SessionWrapper {
         account_addr: AccountAddress,
         resource_tag: &StructTag,
     ) -> Result<Option<serde_json::Value>> {
-        let mut session = self.inner.lock().unwrap();
+        let mut session = self.inner.lock();
         session.view_resource(account_addr, resource_tag)
     }
 
-    pub fn execute_transaction(
+    /// Executes a transaction and records it for GET /transactions/by_hash,
+    /// holding the session lock across the whole execute -> assign-version ->
+    /// store sequence so a concurrent submit can't interleave between the
+    /// commit and its bookkeeping (audit #10). `make_record` is called with the
+    /// committed ledger version, the VM status, and gas used while the lock is
+    /// still held. Executing the txn and then bumping `ops_count` /
+    /// `store_transaction` as separate calls would NOT be atomic — each takes
+    /// its own lock, letting a concurrent submit interleave — which is the bug
+    /// this method exists to avoid. Lock order inner -> ops_count -> tx_store
+    /// matches `execute_transaction_traced_commit`.
+    pub fn execute_and_record<F>(
         &self,
         txn: SignedTransaction,
-    ) -> Result<(VMStatus, TransactionOutput)> {
-        let mut session = self.inner.lock().unwrap();
-        session.execute_transaction(txn)
+        tx_hash: String,
+        make_record: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(u64, &VMStatus, u64) -> serde_json::Value,
+    {
+        let mut session = self.inner.lock();
+        let (vm_status, output) = session.execute_transaction(txn)?;
+        let version = {
+            let mut count = self.ops_count.lock();
+            *count += 1;
+            *count
+        };
+        let gas_used = output.gas_used();
+        let record = make_record(version, &vm_status, gas_used);
+        self.tx_store.lock().insert(tx_hash, record);
+        Ok(())
     }
 
     pub fn simulate_transaction(
@@ -91,7 +165,7 @@ impl SessionWrapper {
 
         let result = (|| {
             {
-                let _session_guard = self.inner.lock().unwrap();
+                let _session_guard = self.inner.lock();
                 copy_session_file(&self.session_path, &temp_path, "config.json")?;
                 copy_session_file(&self.session_path, &temp_path, "delta.json")?;
             }
@@ -137,7 +211,7 @@ impl SessionWrapper {
 
         let result = (|| {
             {
-                let _session_guard = self.inner.lock().unwrap();
+                let _session_guard = self.inner.lock();
                 copy_session_file(&self.session_path, &temp_path, "config.json")?;
                 copy_session_file(&self.session_path, &temp_path, "delta.json")?;
             }
@@ -166,7 +240,7 @@ impl SessionWrapper {
         // path takes them in the reverse order.) The instrumented run is held
         // under the lock for its whole duration — this is intentionally not a
         // fast path.
-        let mut session = self.inner.lock().unwrap();
+        let mut session = self.inner.lock();
         let (output, response) = trace_on(&session, &txn)?;
         if let Some(output) = output {
             // Executed (kept): commit the write set (gas + state) like `submit`,
@@ -183,22 +257,17 @@ impl SessionWrapper {
     }
 
     pub fn store_transaction(&self, hash: String, result: serde_json::Value) {
-        let mut store = self.tx_store.lock().unwrap();
-        if store.len() >= 10_000 {
-            if let Some(oldest) = store.keys().next().cloned() {
-                store.remove(&oldest);
-            }
-        }
+        let mut store = self.tx_store.lock();
         store.insert(hash, result);
     }
 
     pub fn get_transaction(&self, hash: &str) -> Option<serde_json::Value> {
-        let store = self.tx_store.lock().unwrap();
+        let store = self.tx_store.lock();
         store.get(hash).cloned()
     }
 
     pub fn get_module_bytes(&self, addr: AccountAddress, name: &str) -> Result<Option<Vec<u8>>> {
-        let session = self.inner.lock().unwrap();
+        let session = self.inner.lock();
         let module_id = ModuleId::new(addr, Identifier::new(name)?);
         let state_key = StateKey::module_id(&module_id);
         match session.state_store().get_state_value_bytes(&state_key) {
@@ -208,16 +277,41 @@ impl SessionWrapper {
         }
     }
 
+    /// Whether the on-chain `DEFAULT_ACCOUNT_RESOURCE` feature (AIP-115) is
+    /// enabled. A real node uses it to decide between synthesizing a stateless
+    /// account and returning 404 for accounts without `0x1::account::Account`;
+    /// GET /v1/accounts mirrors that. A missing `Features` resource (very old
+    /// forked networks) counts as disabled.
+    pub fn is_default_account_resource_enabled(&self) -> Result<bool> {
+        let session = self.inner.lock();
+        let features_tag = StructTag {
+            address: AccountAddress::ONE,
+            module: Identifier::new("features")?,
+            name: Identifier::new("Features")?,
+            type_args: vec![],
+        };
+        let state_key = StateKey::resource(&AccountAddress::ONE, &features_tag)
+            .map_err(|e| anyhow::anyhow!("Failed to build Features state key: {:?}", e))?;
+        match session.state_store().get_state_value_bytes(&state_key) {
+            Ok(Some(bytes)) => {
+                let features: Features = bcs::from_bytes(&bytes)?;
+                Ok(features.is_enabled(FeatureFlag::DEFAULT_ACCOUNT_RESOURCE))
+            }
+            Ok(None) => Ok(false),
+            Err(e) => Err(anyhow::anyhow!("Failed to read Features resource: {:?}", e)),
+        }
+    }
+
     pub fn get_chain_id(&self) -> u64 {
         self.chain_id
     }
 
     pub fn get_ops_count(&self) -> u64 {
-        self.ops_count.lock().unwrap().clone()
+        self.ops_count.lock().clone()
     }
 
     pub fn increment_ops(&self) {
-        let mut count = self.ops_count.lock().unwrap();
+        let mut count = self.ops_count.lock();
         *count += 1;
     }
 }
@@ -450,5 +544,36 @@ fn redact_url_for_log(raw: &str) -> String {
             parsed.to_string()
         }
         Err(_) => "<invalid url>".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tx_store_evicts_oldest_first() {
+        let mut store = TxStore::with_capacity(2);
+        store.insert("h1".to_string(), serde_json::json!(1));
+        store.insert("h2".to_string(), serde_json::json!(2));
+        store.insert("h3".to_string(), serde_json::json!(3));
+        assert!(store.get("h1").is_none(), "oldest entry must be evicted");
+        assert!(store.get("h2").is_some());
+        assert!(store.get("h3").is_some());
+    }
+
+    #[test]
+    fn tx_store_reinsert_overwrites_without_evicting() {
+        let mut store = TxStore::with_capacity(2);
+        store.insert("h1".to_string(), serde_json::json!(1));
+        store.insert("h2".to_string(), serde_json::json!(2));
+        // Same key again: overwrite, no phantom queue entry, no eviction.
+        store.insert("h2".to_string(), serde_json::json!(22));
+        assert_eq!(store.get("h1"), Some(&serde_json::json!(1)));
+        assert_eq!(store.get("h2"), Some(&serde_json::json!(22)));
+        // A genuinely new key now evicts h1 (the true oldest), not h2.
+        store.insert("h3".to_string(), serde_json::json!(3));
+        assert!(store.get("h1").is_none());
+        assert_eq!(store.get("h2"), Some(&serde_json::json!(22)));
     }
 }
