@@ -456,42 +456,42 @@ async fn submit_transaction(
     let gas_price = txn.gas_unit_price().to_string();
     let expiration = txn.expiration_timestamp_secs().to_string();
 
-    // The whole execute → bump version → record sequence runs inside one
-    // blocking closure so a concurrent submit can't interleave between the
-    // commit and its bookkeeping (audit #10).
+    // execute_and_record holds the session lock across execute + version-bump +
+    // store, so a concurrent submit can't interleave between the commit and its
+    // bookkeeping (audit #10). Running the steps as separate SessionWrapper
+    // calls would NOT be atomic — each takes its own lock. The committed record
+    // is built inside the held lock via this closure.
     let record = {
-        let tx_hash = tx_hash.clone();
+        let hash_field = tx_hash.clone();
         let sender = sender.clone();
         let seq_num = seq_num.clone();
         let max_gas = max_gas.clone();
         let gas_price = gas_price.clone();
         let expiration = expiration.clone();
-        run_blocking(&session, move |s| -> anyhow::Result<()> {
-            let (vm_status, output) = s.execute_transaction(txn)?;
-            s.increment_ops();
-            let version = s.get_ops_count().to_string();
-            let success = vm_status == aptos_types::vm_status::VMStatus::Executed;
-            let vm_status_str = if success {
-                "Executed successfully".to_string()
-            } else {
-                format!("{:?}", vm_status)
-            };
-            let committed = serde_json::json!({
-                "type": "user_transaction",
-                "hash": tx_hash,
-                "success": success,
-                "vm_status": vm_status_str,
-                "version": version,
-                "sender": sender,
-                "sequence_number": seq_num,
-                "max_gas_amount": max_gas,
-                "gas_unit_price": gas_price,
-                "expiration_timestamp_secs": expiration,
-                "gas_used": output.gas_used().to_string(),
-                "timestamp": "0"
-            });
-            s.store_transaction(tx_hash, committed);
-            Ok(())
+        let store_key = tx_hash.clone();
+        run_blocking(&session, move |s| {
+            s.execute_and_record(txn, store_key, |version, vm_status, gas_used| {
+                let success = *vm_status == aptos_types::vm_status::VMStatus::Executed;
+                let vm_status_str = if success {
+                    "Executed successfully".to_string()
+                } else {
+                    format!("{:?}", vm_status)
+                };
+                serde_json::json!({
+                    "type": "user_transaction",
+                    "hash": hash_field,
+                    "success": success,
+                    "vm_status": vm_status_str,
+                    "version": version.to_string(),
+                    "sender": sender,
+                    "sequence_number": seq_num,
+                    "max_gas_amount": max_gas,
+                    "gas_unit_price": gas_price,
+                    "expiration_timestamp_secs": expiration,
+                    "gas_used": gas_used.to_string(),
+                    "timestamp": "0"
+                })
+            })
         })
         .await
         .map_err(to_json_error)?

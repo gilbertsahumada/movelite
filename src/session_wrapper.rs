@@ -124,12 +124,36 @@ impl SessionWrapper {
         session.view_resource(account_addr, resource_tag)
     }
 
-    pub fn execute_transaction(
+    /// Executes a transaction and records it for GET /transactions/by_hash,
+    /// holding the session lock across the whole execute -> assign-version ->
+    /// store sequence so a concurrent submit can't interleave between the
+    /// commit and its bookkeeping (audit #10). `make_record` is called with the
+    /// committed ledger version, the VM status, and gas used while the lock is
+    /// still held. Executing the txn and then bumping `ops_count` /
+    /// `store_transaction` as separate calls would NOT be atomic — each takes
+    /// its own lock, letting a concurrent submit interleave — which is the bug
+    /// this method exists to avoid. Lock order inner -> ops_count -> tx_store
+    /// matches `execute_transaction_traced_commit`.
+    pub fn execute_and_record<F>(
         &self,
         txn: SignedTransaction,
-    ) -> Result<(VMStatus, TransactionOutput)> {
+        tx_hash: String,
+        make_record: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(u64, &VMStatus, u64) -> serde_json::Value,
+    {
         let mut session = self.inner.lock();
-        session.execute_transaction(txn)
+        let (vm_status, output) = session.execute_transaction(txn)?;
+        let version = {
+            let mut count = self.ops_count.lock();
+            *count += 1;
+            *count
+        };
+        let gas_used = output.gas_used();
+        let record = make_record(version, &vm_status, gas_used);
+        self.tx_store.lock().insert(tx_hash, record);
+        Ok(())
     }
 
     pub fn simulate_transaction(
