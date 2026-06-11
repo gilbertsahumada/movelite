@@ -1,6 +1,6 @@
 {
   "name": "movelite",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Lightweight Move VM for local development — anvil-like experience for Movement L1",
   "repository": {
     "type": "git",
