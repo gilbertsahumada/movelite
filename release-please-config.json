@@ -5,7 +5,6 @@
       "release-type": "node",
       "package-name": "movelite",
       "include-component-in-tag": false,
-      "changelog-path": "../../CHANGELOG.md",
       "extra-files": ["Cargo.toml"]
     }
   }
