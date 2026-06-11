@@ -65,6 +65,22 @@ The build script clones `aptos-core` (pinned to the last Apache 2.0 commit) and 
 ./target/movelite start --port 8090 --fork-url https://testnet.movementnetwork.xyz/v1
 ```
 
+#### Options
+
+| Flag | Description |
+|---|---|
+| `--port <u16>` | Port to listen on (default `8090`) |
+| `--fork-url <url>` | Fork from a remote network's REST endpoint |
+| `--fork-version <u64>` | Remote ledger version to fork from (default `0`) |
+| `--chain-id <u8>` | Override the chain id reported to clients and written to genesis state |
+| `--session-dir <path>` | Persist session state in this directory instead of a per-process tempdir |
+| `--reset` | Delete the selected session directory before starting |
+| `--auth-token <token>` | Token for movelite-only mutating endpoints (`/mint`); auto-generated and printed at startup if omitted |
+| `--no-auth` | Disable local auth checks |
+| `--strict-local-auth` | Also require the token for Aptos-compatible mutating endpoints (submit, trace `?commit=true`) |
+
+Authenticated endpoints expect the token in the `x-movelite-token` header.
+
 ### Test
 
 ```bash
@@ -91,10 +107,27 @@ movelite implements a subset of the [Aptos REST API](https://aptos.dev/en/build/
 | `/v1/accounts/:address` | GET | Account data (sequence number, auth key) | Done |
 | `/v1/accounts/:address/resources` | GET | Common framework resources subset | Done |
 | `/v1/accounts/:address/resource/:type` | GET | Specific account resource | Done |
-| `/v1/view` | POST | Execute view function (BCS args) | Done |
+| `/v1/accounts/:address/module/:module_name` | GET | Module bytecode + ABI | Done |
+| `/v1/estimate_gas_price` | GET | Gas price estimate | Done |
+| `/v1/view` | POST | Execute view function (BCS or JSON args) | Done |
 | `/v1/transactions` | POST | Submit signed transaction (BCS body) | Done |
 | `/v1/transactions/simulate` | POST | Simulate transaction without commit | Done |
+| `/v1/transactions/trace` | POST | Foundry-style execution trace (`?commit=true` to also commit) | Done |
+| `/v1/transactions/by_hash/:hash` | GET | Committed transaction by hash | Done |
+| `/v1/transactions/wait_by_hash/:hash` | GET | Same as `by_hash` (commits are synchronous, returns immediately) | Done |
 | `/mint` | POST | Fund account (faucet, requires `x-movelite-token` by default) | Done |
+
+Transaction endpoints accept BCS bodies only (`Content-Type: application/x.aptos.signed_transaction+bcs`); JSON transaction submission returns `415`. Responses are JSON. Requests time out after 30s and bodies are capped at 2MB.
+
+### Execution traces
+
+`POST /v1/transactions/trace` executes a BCS-signed transaction through an instrumented VM and returns a Foundry-style call tree (per-frame gas, args, events, abort stack). By default it runs on a throwaway clone of the session (never mutates state); pass `?commit=true` to also commit the result like a submit:
+
+```bash
+curl -X POST "http://localhost:8090/v1/transactions/trace" \
+  -H "Content-Type: application/x.aptos.signed_transaction+bcs" \
+  --data-binary @signed-txn.bcs
+```
 
 ## Integration with movehat
 
@@ -115,7 +148,7 @@ movelite uses the `aptos-transaction-simulation-session` crate from aptos-core. 
 2. **Drives the AptosVM directly** -- `execute_transaction()`, `execute_view_function()`, `fund_account()`
 3. **Persists state to disk** as JSON delta files (config.json + delta.json)
 
-The HTTP server (axum) wraps the session behind a `Mutex` and translates REST requests into session method calls.
+The HTTP server (axum) wraps the session behind a `Mutex` and translates REST requests into session method calls. VM work runs on a blocking thread pool so the async runtime stays responsive; requests are bounded by a 30s timeout, a 2MB body limit, and a global concurrency cap.
 
 ## License
 
