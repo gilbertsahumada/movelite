@@ -16,6 +16,16 @@ use std::sync::Arc;
 
 type AppState = Arc<ServerState>;
 
+/// JSON error in the canonical Aptos REST shape
+/// (`{message, error_code, vm_error_code}`).
+type ApiError = (StatusCode, Json<serde_json::Value>);
+
+/// Local dev tool guardrails: one slow/hung VM call must not wedge every
+/// other request (audit #7).
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CONCURRENT_REQUESTS: usize = 64;
+
 pub struct ServerOptions {
     pub auth_token: Option<String>,
     pub strict_local_auth: bool,
@@ -49,10 +59,31 @@ pub async fn run(session: SessionWrapper, port: u16, options: ServerOptions) -> 
             get(get_transaction_by_hash),
         );
 
+    // Layer order (axum applies bottom-up, so the LAST .layer() is outermost):
+    // ledger-header injection stays outermost so even timeout/limit error
+    // responses carry the `x-aptos-*` headers the Aptos REST client requires.
+    // HandleErrorLayer converts the timeout's BoxError into a response (Router
+    // services must be infallible); putting Timeout above ConcurrencyLimit
+    // makes the 30s budget also cover time spent queued on the semaphore.
+    // GlobalConcurrencyLimitLayer (not ConcurrencyLimitLayer) shares one
+    // semaphore across all connections. The timeout drops the response but
+    // does NOT cancel the VM task — it runs to completion on the blocking
+    // pool; real cancellation would need a VM actor (out of scope).
     let app = Router::new()
         .route("/v1/", get(ledger_info))
         .nest("/v1", v1)
         .route("/mint", post(mint))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(
+            tower::ServiceBuilder::new()
+                .layer(axum::error_handling::HandleErrorLayer::new(
+                    handle_layer_error,
+                ))
+                .layer(tower::timeout::TimeoutLayer::new(REQUEST_TIMEOUT))
+                .layer(tower::limit::GlobalConcurrencyLimitLayer::new(
+                    MAX_CONCURRENT_REQUESTS,
+                )),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             inject_ledger_headers,
@@ -147,21 +178,53 @@ struct AccountDataResponse {
     authentication_key: String,
 }
 
+/// Outcome of looking up `0x1::account::Account`, resolved on the blocking pool.
+enum AccountLookup {
+    Found(serde_json::Value),
+    /// No Account resource, but `DEFAULT_ACCOUNT_RESOURCE` is enabled: a real
+    /// node synthesizes a stateless account (`AccountResource::new_stateless`).
+    Stateless,
+    /// No Account resource and the feature is disabled (e.g. a fork of an
+    /// older network): a real node returns 404.
+    NotFound,
+}
+
 async fn get_account(
     State(session): State<AppState>,
     Path(address): Path<String>,
-) -> Result<Json<AccountDataResponse>, (StatusCode, String)> {
-    let addr = parse_address(&address)?;
+) -> Result<Json<AccountDataResponse>, ApiError> {
+    let addr = parse_address(&address).map_err(to_json_error)?;
 
-    let account_tag = StructTag {
-        address: AccountAddress::ONE,
-        module: Identifier::new("account").unwrap(),
-        name: Identifier::new("Account").unwrap(),
-        type_args: vec![],
-    };
+    let lookup = run_blocking(&session, move |s| -> anyhow::Result<AccountLookup> {
+        let account_tag = StructTag {
+            address: AccountAddress::ONE,
+            module: Identifier::new("account").unwrap(),
+            name: Identifier::new("Account").unwrap(),
+            type_args: vec![],
+        };
+        match s.view_resource(addr, &account_tag)? {
+            Some(value) => Ok(AccountLookup::Found(value)),
+            None => {
+                if s.is_default_account_resource_enabled()? {
+                    Ok(AccountLookup::Stateless)
+                } else {
+                    Ok(AccountLookup::NotFound)
+                }
+            }
+        }
+    })
+    .await
+    .map_err(to_json_error)?
+    .map_err(|e| {
+        to_json_error((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("view_resource error for {}: {}", address, e),
+        ))
+    })?;
 
-    match session.session.view_resource(addr, &account_tag) {
-        Ok(Some(value)) => {
+    let version = session.session.get_ops_count();
+    match lookup {
+        AccountLookup::Found(value) => {
             let seq = value
                 .get("sequence_number")
                 .and_then(|v| v.as_str())
@@ -177,13 +240,19 @@ async fn get_account(
                 authentication_key: auth_key,
             }))
         }
-        Ok(None) => Ok(Json(AccountDataResponse {
+        // Mirror `AccountResource::new_stateless`: the auth key is the
+        // address itself, not zeros (audit #17).
+        AccountLookup::Stateless => Ok(Json(AccountDataResponse {
             sequence_number: "0".to_string(),
-            authentication_key: format!("0x{}", "0".repeat(64)),
+            authentication_key: format!("0x{}", hex::encode(addr.to_vec())),
         })),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("view_resource error for {}: {}", address, e),
+        AccountLookup::NotFound => Err(json_error(
+            StatusCode::NOT_FOUND,
+            "account_not_found",
+            &format!(
+                "Account not found by Address({}) and Ledger version({})",
+                address, version
+            ),
         )),
     }
 }
@@ -213,19 +282,34 @@ async fn get_account_resources(
         "0x1::staking_contract::Store",
     ];
 
-    let mut resources = Vec::new();
-    for type_str in &known_types {
-        if let Ok(tag) = type_str.parse::<StructTag>() {
-            if let Ok(Some(data)) = session.session.view_resource(addr, &tag) {
-                resources.push(ResourceResponse {
+    run_blocking(&session, move |s| {
+        let mut resources = Vec::new();
+        for type_str in &known_types {
+            // Static, well-formed constants — a parse failure is a programmer
+            // error, not a runtime condition.
+            let tag = type_str
+                .parse::<StructTag>()
+                .expect("known_types entries are valid struct tags");
+            // Distinguish "absent" (skip) from "storage failed" (propagate):
+            // a partial 200 on an unhealthy session silently lies (audit #15).
+            match s.view_resource(addr, &tag) {
+                Ok(Some(data)) => resources.push(ResourceResponse {
                     r#type: type_str.to_string(),
                     data,
-                });
+                }),
+                Ok(None) => {}
+                Err(e) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("view_resource failed for {}: {}", type_str, e),
+                    ))
+                }
             }
         }
-    }
-
-    Ok(Json(resources))
+        Ok(resources)
+    })
+    .await?
+    .map(Json)
 }
 
 async fn get_module(
@@ -234,10 +318,12 @@ async fn get_module(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let addr = parse_address(&address)?;
 
-    let bytes = session
-        .session
-        .get_module_bytes(addr, &module_name)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let bytes = {
+        let module_name = module_name.clone();
+        run_blocking(&session, move |s| s.get_module_bytes(addr, &module_name))
+            .await?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
 
     match bytes {
         Some(bytecode) => {
@@ -270,7 +356,11 @@ async fn get_account_resource(
         urlencoding::decode(trimmed).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let tag = parse_struct_tag(&decoded_type)?;
 
-    match session.session.view_resource(addr, &tag) {
+    let lookup = {
+        let tag = tag.clone();
+        run_blocking(&session, move |s| s.view_resource(addr, &tag)).await?
+    };
+    match lookup {
         Ok(Some(data)) => Ok(Json(ResourceResponse {
             r#type: decoded_type.to_string(),
             data,
@@ -308,11 +398,12 @@ async fn view_function(
             )
         })?;
 
-        return session
-            .session
-            .execute_view_function(vf.module, vf.function, vf.ty_args, vf.args)
-            .map(Json)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()));
+        return run_blocking(&session, move |s| {
+            s.execute_view_function(vf.module, vf.function, vf.ty_args, vf.args)
+        })
+        .await?
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()));
     }
 
     let payload: ViewRequest = serde_json::from_slice(&body)
@@ -332,27 +423,30 @@ async fn view_function(
         .map(|v| serialize_view_arg(v))
         .collect::<Result<_, _>>()?;
 
-    session
-        .session
-        .execute_view_function(module_id, func_name, ty_args, args)
-        .map(Json)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+    run_blocking(&session, move |s| {
+        s.execute_view_function(module_id, func_name, ty_args, args)
+    })
+    .await?
+    .map(Json)
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
 async fn submit_transaction(
     State(session): State<AppState>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_bcs_content_type(&headers)?;
+    reject_bcs_accept(&headers)?;
     if session.options.strict_local_auth {
-        require_auth(&headers, &session)?;
+        require_auth(&headers, &session).map_err(to_json_error)?;
     }
 
     let txn: aptos_types::transaction::SignedTransaction = bcs::from_bytes(&body).map_err(|e| {
-        (
+        to_json_error((
             StatusCode::BAD_REQUEST,
             format!("Failed to deserialize BCS transaction: {}", e),
-        )
+        ))
     })?;
 
     let tx_hash = format!("0x{}", hex::encode(txn.committed_hash().to_vec()));
@@ -362,38 +456,49 @@ async fn submit_transaction(
     let gas_price = txn.gas_unit_price().to_string();
     let expiration = txn.expiration_timestamp_secs().to_string();
 
-    let (vm_status, output) = session
-        .session
-        .execute_transaction(txn)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    session.session.increment_ops();
-    let version = session.session.get_ops_count().to_string();
-    let success = vm_status == aptos_types::vm_status::VMStatus::Executed;
-    let vm_status_str = if success {
-        "Executed successfully".to_string()
-    } else {
-        format!("{:?}", vm_status)
+    // The whole execute → bump version → record sequence runs inside one
+    // blocking closure so a concurrent submit can't interleave between the
+    // commit and its bookkeeping (audit #10).
+    let record = {
+        let tx_hash = tx_hash.clone();
+        let sender = sender.clone();
+        let seq_num = seq_num.clone();
+        let max_gas = max_gas.clone();
+        let gas_price = gas_price.clone();
+        let expiration = expiration.clone();
+        run_blocking(&session, move |s| -> anyhow::Result<()> {
+            let (vm_status, output) = s.execute_transaction(txn)?;
+            s.increment_ops();
+            let version = s.get_ops_count().to_string();
+            let success = vm_status == aptos_types::vm_status::VMStatus::Executed;
+            let vm_status_str = if success {
+                "Executed successfully".to_string()
+            } else {
+                format!("{:?}", vm_status)
+            };
+            let committed = serde_json::json!({
+                "type": "user_transaction",
+                "hash": tx_hash,
+                "success": success,
+                "vm_status": vm_status_str,
+                "version": version,
+                "sender": sender,
+                "sequence_number": seq_num,
+                "max_gas_amount": max_gas,
+                "gas_unit_price": gas_price,
+                "expiration_timestamp_secs": expiration,
+                "gas_used": output.gas_used().to_string(),
+                "timestamp": "0"
+            });
+            s.store_transaction(tx_hash, committed);
+            Ok(())
+        })
+        .await
+        .map_err(to_json_error)?
     };
-
-    let committed = serde_json::json!({
-        "type": "user_transaction",
-        "hash": tx_hash,
-        "success": success,
-        "vm_status": vm_status_str,
-        "version": version,
-        "sender": sender,
-        "sequence_number": seq_num,
-        "max_gas_amount": max_gas,
-        "gas_unit_price": gas_price,
-        "expiration_timestamp_secs": expiration,
-        "gas_used": output.gas_used().to_string(),
-        "timestamp": "0"
-    });
-
-    session
-        .session
-        .store_transaction(tx_hash.clone(), committed);
+    record.map_err(|e| {
+        to_json_error((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+    })?;
 
     Ok(Json(serde_json::json!({
         "type": "pending_transaction",
@@ -423,21 +528,25 @@ async fn get_transaction_by_hash(
 
 async fn simulate_transaction(
     State(session): State<AppState>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    require_bcs_content_type(&headers)?;
+    reject_bcs_accept(&headers)?;
+
     let txn: aptos_types::transaction::SignedTransaction = bcs::from_bytes(&body).map_err(|e| {
-        (
+        to_json_error((
             StatusCode::BAD_REQUEST,
             format!("Failed to deserialize BCS transaction: {}", e),
-        )
+        ))
     })?;
 
     let tx_hash = format!("0x{}", hex::encode(txn.committed_hash().to_vec()));
 
-    let (vm_status, output) = session
-        .session
-        .simulate_transaction(txn)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let (vm_status, output) = run_blocking(&session, move |s| s.simulate_transaction(txn))
+        .await
+        .map_err(to_json_error)?
+        .map_err(|e| to_json_error((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())))?;
 
     let success = vm_status == aptos_types::vm_status::VMStatus::Executed;
 
@@ -466,29 +575,31 @@ async fn trace_transaction(
     Query(params): Query<TraceParams>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let commit = params.commit.unwrap_or(false);
+    require_bcs_content_type(&headers)?;
+    reject_bcs_accept(&headers)?;
 
     let txn: aptos_types::transaction::SignedTransaction = bcs::from_bytes(&body).map_err(|e| {
-        (
+        to_json_error((
             StatusCode::BAD_REQUEST,
             format!("Failed to deserialize BCS transaction: {}", e),
-        )
+        ))
     })?;
 
     // Committing mutates state, so gate it like submit_transaction.
     if commit && session.options.strict_local_auth {
-        require_auth(&headers, &session)?;
+        require_auth(&headers, &session).map_err(to_json_error)?;
     }
 
-    let trace = session
-        .session
-        .execute_transaction_traced(txn, commit)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let trace = run_blocking(&session, move |s| s.execute_transaction_traced(txn, commit))
+        .await
+        .map_err(to_json_error)?
+        .map_err(|e| to_json_error((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())))?;
 
     serde_json::to_value(trace)
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(|e| to_json_error((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())))
 }
 
 #[derive(Deserialize)]
@@ -506,11 +617,14 @@ async fn mint(
 
     let addr = parse_address(&params.address)?;
 
-    session
-        .session
-        .fund_account(addr, params.amount)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    session.session.increment_ops();
+    let amount = params.amount;
+    run_blocking(&session, move |s| -> anyhow::Result<()> {
+        s.fund_account(addr, amount)?;
+        s.increment_ops();
+        Ok(())
+    })
+    .await?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -520,6 +634,107 @@ async fn mint(
 }
 
 // --- helpers ---
+
+/// Runs VM/session work on the blocking thread pool so it never stalls a tokio
+/// worker (the session mutex is held for the whole VM execution). A panic in
+/// the closure surfaces as a 500 on THIS request only — combined with the
+/// non-poisoning session lock, it can't brick subsequent requests (audit #7/#11).
+async fn run_blocking<R, F>(state: &AppState, f: F) -> Result<R, (StatusCode, String)>
+where
+    F: FnOnce(&SessionWrapper) -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || f(&state.session))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("VM task panicked: {e}"),
+            )
+        })
+}
+
+/// Canonical Aptos REST error body.
+fn json_error(status: StatusCode, error_code: &str, message: &str) -> ApiError {
+    (
+        status,
+        Json(serde_json::json!({
+            "message": message,
+            "error_code": error_code,
+            "vm_error_code": null
+        })),
+    )
+}
+
+/// Converts the plain-text error tuple used by most handlers into the
+/// canonical JSON error shape.
+fn to_json_error((status, message): (StatusCode, String)) -> ApiError {
+    let code = match status {
+        StatusCode::BAD_REQUEST => "invalid_input",
+        StatusCode::UNAUTHORIZED => "unauthorized",
+        StatusCode::NOT_FOUND => "not_found",
+        _ => "internal_error",
+    };
+    json_error(status, code, &message)
+}
+
+/// BCS transaction endpoints reject JSON bodies with 415 instead of a
+/// confusing BCS deserialize error (audit #12). A missing Content-Type is
+/// allowed for raw-client compatibility — the body is still BCS-validated.
+fn require_bcs_content_type(headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(content_type) = headers.get("content-type").and_then(|v| v.to_str().ok()) else {
+        return Ok(());
+    };
+    // Lenient sniff, same as /v1/view: matches the SDK's canonical
+    // `application/x.aptos.signed_transaction+bcs` and generic
+    // `application/x-bcs`. `application/octet-stream` is also tolerated.
+    let ct = content_type.to_ascii_lowercase();
+    if ct.contains("bcs") || ct.contains("octet-stream") {
+        return Ok(());
+    }
+    Err(json_error(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "unsupported_media_type",
+        "movelite only accepts BCS-signed transactions; set Content-Type: \
+         application/x.aptos.signed_transaction+bcs (JSON transaction submission is not supported)",
+    ))
+}
+
+/// movelite only emits JSON. If the client's Accept header demands a BCS
+/// response and admits nothing else, fail loudly with 406 instead of
+/// returning a body it won't parse (audit #13).
+fn reject_bcs_accept(headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(accept) = headers.get("accept").and_then(|v| v.to_str().ok()) else {
+        return Ok(());
+    };
+    let accept = accept.to_ascii_lowercase();
+    let demands_bcs = accept.contains("bcs");
+    let admits_json = accept.contains("application/json") || accept.contains("*/*");
+    if demands_bcs && !admits_json {
+        return Err(json_error(
+            StatusCode::NOT_ACCEPTABLE,
+            "not_acceptable",
+            "movelite only produces JSON responses; BCS response encoding is not supported",
+        ));
+    }
+    Ok(())
+}
+
+/// Converts tower-layer errors (the Router itself must be infallible).
+async fn handle_layer_error(err: tower::BoxError) -> (StatusCode, String) {
+    if err.is::<tower::timeout::error::Elapsed>() {
+        (
+            StatusCode::REQUEST_TIMEOUT,
+            format!("request timed out after {}s", REQUEST_TIMEOUT.as_secs()),
+        )
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("service error: {err}"),
+        )
+    }
+}
 
 fn serialize_view_arg(v: &serde_json::Value) -> Result<Vec<u8>, (StatusCode, String)> {
     match v {
@@ -613,5 +828,61 @@ fn require_auth(headers: &HeaderMap, state: &ServerState) -> Result<(), (StatusC
             StatusCode::UNAUTHORIZED,
             "missing or invalid x-movelite-token".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (k, v) in pairs {
+            map.insert(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn content_type_sdk_bcs_passes() {
+        let h = headers(&[(
+            "content-type",
+            "application/x.aptos.signed_transaction+bcs",
+        )]);
+        assert!(require_bcs_content_type(&h).is_ok());
+    }
+
+    #[test]
+    fn content_type_missing_passes() {
+        assert!(require_bcs_content_type(&HeaderMap::new()).is_ok());
+    }
+
+    #[test]
+    fn content_type_json_is_415() {
+        let h = headers(&[("content-type", "application/json")]);
+        let (status, _) = require_bcs_content_type(&h).unwrap_err();
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[test]
+    fn accept_bcs_only_is_406() {
+        let h = headers(&[("accept", "application/x-bcs")]);
+        let (status, _) = reject_bcs_accept(&h).unwrap_err();
+        assert_eq!(status, StatusCode::NOT_ACCEPTABLE);
+    }
+
+    #[test]
+    fn accept_json_or_wildcard_passes() {
+        assert!(reject_bcs_accept(&headers(&[("accept", "application/json")])).is_ok());
+        assert!(reject_bcs_accept(&headers(&[("accept", "*/*")])).is_ok());
+        // BCS preferred but JSON admitted -> we can still answer.
+        assert!(
+            reject_bcs_accept(&headers(&[("accept", "application/x-bcs, application/json")]))
+                .is_ok()
+        );
+        assert!(reject_bcs_accept(&HeaderMap::new()).is_ok());
     }
 }
