@@ -1,136 +1,61 @@
 name: Release
 
+# Release automation entrypoint. Two paths, both of which end up calling the
+# reusable publish.yml — so the OIDC token's entrypoint workflow is always
+# `release.yml`, matching the npm Trusted Publishers (this is why publishing
+# lives behind this filename and not publish.yml directly).
+#
+#  - push to main: release-please opens/updates a single "Release PR" that bumps
+#    the version + writes CHANGELOG. Merging it creates the vX.Y.Z tag + Release
+#    and, in the same run, publishes to npm. (The default GITHUB_TOKEN can't make
+#    the Release re-trigger another workflow, so we call publish.yml directly —
+#    no PAT needed.)
+#  - manual workflow_dispatch with a version: publishes that exact version
+#    (e.g. to re-publish a release whose npm step failed, or to cut a prerelease).
+
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release (no v prefix, e.g. 0.1.0)"
+        description: "Publish this exact version now (no v prefix, e.g. 0.2.1)"
         required: true
-  # Called by release-please.yml after it creates a Release. Kept alongside the
-  # release/dispatch triggers so manual UI releases and manual reruns still work.
-  workflow_call:
-    inputs:
-      version:
-        description: "Version to release (no v prefix, e.g. 0.1.0)"
-        required: true
-        type: string
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: darwin-arm64
-            os: macos-14
-          - target: darwin-x64
-            os: macos-15-intel
-          - target: linux-x64
-            os: ubuntu-24.04
-          - target: linux-arm64
-            os: ubuntu-24.04-arm
+  release-please:
+    name: Maintain release PR
+    runs-on: ubuntu-latest
+    # Only the automated push path runs release-please; manual dispatch goes
+    # straight to publishing the requested version.
+    if: ${{ github.event_name == 'push' }}
+    outputs:
+      # Manifest mode with a package at npm/movelite -> outputs are path-prefixed.
+      release_created: ${{ steps.rp.outputs['npm/movelite--release_created'] }}
+      version: ${{ steps.rp.outputs['npm/movelite--version'] }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux build deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config libssl-dev libudev-dev clang
-
-      - name: Install macOS build deps
-        if: runner.os == 'macOS'
-        run: brew install cmake
-
-      - name: Cache cargo registry + aptos-core target
-        uses: actions/cache@v4
+      - uses: googleapis/release-please-action@v4
+        id: rp
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            .aptos-core/target
-          key: cargo-${{ matrix.target }}-${{ hashFiles('Cargo.toml', 'build.sh') }}
-          restore-keys: |
-            cargo-${{ matrix.target }}-
-
-      - name: Build movelite
-        run: bash build.sh
-
-      - name: Strip binary
-        # Strip embedded debug info so the published platform package stays
-        # small (unstripped Linux ELF is ~1.5GB). Native strip per runner.
-        run: strip target/movelite
-
-      - name: Smoke test
-        run: ./target/movelite --help
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: movelite-${{ matrix.target }}
-          path: target/movelite
-          if-no-files-found: error
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # config-file / manifest-file default to release-please-config.json
+          # and .release-please-manifest.json at the repo root.
 
   publish:
-    name: Publish to npm
-    needs: build
-    runs-on: ubuntu-latest
+    name: Publish release
+    needs: release-please
+    # Publish when release-please just cut a release (push), or always on a
+    # manual dispatch. `always()` lets this run even though release-please is
+    # skipped on dispatch.
+    if: ${{ always() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
     permissions:
       contents: read
       id-token: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Upgrade npm to >= 11.5.1 for Trusted Publishers
-        # OIDC + provenance only ship in npm >= 11.5.1; Node 20 bundles ~10.x.
-        run: npm install -g npm@latest
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts/
-
-      - name: Resolve and validate version
-        id: version
-        # Read both raw inputs via `env:` (never inline `${{ }}` into the
-        # script) so a poisoned release tag / dispatch input can't break out of
-        # this step's shell. Strip a leading `v` from release tags, then enforce
-        # strict semver before any downstream step (publish-npm.sh) consumes it.
-        env:
-          RAW_RELEASE_TAG: ${{ github.event.release.tag_name }}
-          # `inputs.version` is populated for BOTH workflow_dispatch and
-          # workflow_call (release-please), so one branch covers both. The
-          # `release:` event leaves it empty and uses the tag instead.
-          INPUT_VERSION: ${{ inputs.version }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [ "$EVENT_NAME" = "release" ]; then
-            VERSION="${RAW_RELEASE_TAG#v}"
-          else
-            VERSION="$INPUT_VERSION"
-          fi
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Resolved version '$VERSION' is not valid semver." >&2
-            exit 1
-          fi
-          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Publishing version: $VERSION"
-
-      - name: Publish packages (Trusted Publishers + provenance)
-        # Authenticates via GitHub Actions OIDC (id-token: write). Requires a
-        # Trusted Publisher configured on npmjs.com for each package. No
-        # NPM_TOKEN secret consumed.
-        run: bash scripts/publish-npm.sh "${{ steps.version.outputs.value }}"
+    uses: ./.github/workflows/publish.yml
+    with:
+      version: ${{ github.event_name == 'workflow_dispatch' && inputs.version || needs.release-please.outputs.version }}
+    secrets: inherit
